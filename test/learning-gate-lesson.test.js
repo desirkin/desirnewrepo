@@ -8,7 +8,7 @@ import os from 'node:os';
 import { GATE_BANDS, GATE_LESSON_DEFAULTS, testsOf, evaluateUnit, computeGateLesson, gateLessonLine, runGateStudy, createGateLesson, gateLessonPaths, GATE_LESSON_VERSION } from '../learning/gate-lesson.js';
 import { LEARNABLE_GATES } from '../judge/setups.js';
 
-const CFG = { ...GATE_LESSON_DEFAULTS, minScored: 200, minCohort: 20, minForward: 20, confidence: 0.8, bootstraps: 200, costHurdlePct: 0.2 }; // PUBLISH-FIX-83 item 20: the synthetic returns are in 15-minute log %, the hurdle here is 0.2 (production: 1.0, the round trip)
+const CFG = { ...GATE_LESSON_DEFAULTS, minScored: 200, minCohort: 20, minForward: 20, confidence: 0.8, bootstraps: 200, costHurdlePct: 0.2, minClusters: 12 }; // PUBLISH-FIX-93: these tests exercise the propose/forward-test/publish/revert LOGIC on twelve synthetic coins, so they name their own cluster floor; the production floor (30) is asserted in publish-fix-93 // PUBLISH-FIX-83 item 20: the synthetic returns are in 15-minute log %, the hurdle here is 0.2 (production: 1.0, the round trip)
 const T0 = Date.parse('2026-09-10T00:00:00Z');
 // a synthetic scored look: FI15 observed `value` judged against `line`, every other gate ok, 15-minute return `r`
 const look = (i, { value, line = 0.2, r, othersOk = true, ts = T0 + i * 60_000, gate = 'FI15', setup = 'RANGE_IGNITION', coin = `C${i % 12}` }) => ({ gate, setup, ts, coin, value, line, othersOk, r }); // twelve coins: every hour of looks is twelve bootstrap clusters
@@ -35,8 +35,8 @@ test('GL-01. testsOf joins looks with their scored 15-minute outcome by (coin, d
   assert.equal(tests.length, 5, JSON.stringify(tests));
   assert.ok(tests.some((t) => t.value === 0.7 && t.r === 0.9), 'a 1.5 s clock gap still joins'); assert.equal(tests.filter((t) => t.value === 0.7).length, 1, 'a 5 s gap does not');
   const ake = tests.filter((t) => t.gate === 'FI15' && t.value === 0.196); assert.equal(ake.length, 1); assert.equal(ake[0].othersOk, true, 'MOVE_CLOCK ok:false is not a gate'); assert.equal(ake[0].r, 1.2); assert.equal(ake[0].line, 0.2);
-  const akeRv = tests.find((t) => t.gate === 'RV60' && t.value === 2.5); assert.equal(akeRv.othersOk, true, 'PUBLISH-FIX-91: FI15 failing beside it is the flow family, not a structural refusal');
-  const zamaFi = tests.find((t) => t.gate === 'FI15' && t.value === 0.6); assert.equal(zamaFi.othersOk, true, 'PUBLISH-FIX-91: RV60 failing beside it is the flow family');
+  const akeRv = tests.find((t) => t.gate === 'RV60' && t.value === 2.5); assert.equal(akeRv.othersOk, false, 'PUBLISH-FIX-93 (review F1): FI15 failing beside it means RV60 did not decide this look alone — not evidence for moving RV60'); assert.equal(akeRv.familyOk, true, 'the flow-family view is still reported');
+  const zamaFi = tests.find((t) => t.gate === 'FI15' && t.value === 0.6); assert.equal(zamaFi.othersOk, false, 'PUBLISH-FIX-93 (review F1): RV60 failing beside it means FI15 did not decide this look alone'); assert.equal(zamaFi.familyOk, true, 'the flow-family view is still reported');
   assert.ok(!tests.some((t) => t.r === 5), 'the old look is outside the lookback');
 });
 

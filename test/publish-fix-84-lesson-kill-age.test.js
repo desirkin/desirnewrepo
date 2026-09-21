@@ -50,7 +50,7 @@ test('FIX89-L3 (blind review 864b4c3a F3). a future-dated lesson is rejected on 
   assert.deepEqual(l2.lesson('RANGE_IGNITION'), {}, 'aged out on the read itself'); assert.match(l2.line(), /lesson STALE/);
 });
 
-test('FIX91 (the starved learner). a look counts toward a flow gate\'s study when every gate OUTSIDE the flow family passed — the other flow gates may fail too; a structural refusal still excludes it', () => {
+test('FIX91 -> FIX93 (review F1). the flow-family view is REPORTED (familyOk) but only a look this gate alone decided is EVIDENCE (othersOk): a sibling flow gate failing excludes it from the count, exactly as a structural refusal does', () => {
   const T0 = 1_000_000_000_000;
   const ep = (i, gates) => ({ datasetId: 'live-judge-x', canonicalCoin: 'AAA', decisionTs: T0 + i * 60_000, setupType: 'RANGE_IGNITION', gates });
   const g = (id, ok, observed, threshold) => ({ id, ok, observed, threshold });
@@ -61,6 +61,9 @@ test('FIX91 (the starved learner). a look counts toward a flow gate\'s study whe
   ];
   const outcomes = episodes.map((e) => ({ assetId: 'AAA', decisionKnownAtTs: e.decisionTs, yardstick: { continuation: { state: 'KNOWN', logReturnPct: 1 }, bite: { state: 'KNOWN', logReturnPct: 0.5 } } }));
   const tests = testsOf(episodes, outcomes, { nowTs: T0 + 3_600_000 });
-  const fi15 = tests.filter((t) => t.gate === 'FI15').map((t) => [t.ts, t.othersOk]);
-  assert.deepEqual(fi15, [[T0 + 60_000, true], [T0 + 120_000, false], [T0 + 180_000, true]], JSON.stringify(tests));
+  const fi15 = tests.filter((t) => t.gate === 'FI15').map((t) => [t.ts, t.othersOk, t.familyOk]);
+  // PUBLISH-FIX-93: FIX-91 counted look 1 as evidence for FI15 even though RV60 and FI60_POSITIVE refused it too. A promotion moves ONE
+  // line, so that look would still not trade — it is reported in the family view and never counted. Look 2 is a structural refusal
+  // (excluded from both). Look 3 passed everything, so FI15 alone decided it.
+  assert.deepEqual(fi15, [[T0 + 60_000, false, true], [T0 + 120_000, false, false], [T0 + 180_000, true, true]], JSON.stringify(tests));
 });

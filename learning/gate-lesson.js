@@ -39,9 +39,16 @@ export const GATE_LESSON_DEFAULTS = Object.freeze({
   minForward: 100,      // scored looks AFTER a proposal before it is published (and after a publication before it is judged)
   confidence: 0.9,      // bootstrap probability the cohort a move changes clears the hurdle (LOOSEN) / reads worse than the kept set (TIGHTEN); 0.9 (was 0.8): with the forward test at the same bar a spurious publish needs two 1-in-10 draws
   tolerancePct: 0.05,   // kept for the ledger line; the test itself is against the cost hurdle (PUBLISH-FIX-83 item 20)
-  costHurdlePct: 1.0,   // PUBLISH-FIX-83 item 20: the round trip in log-return % (fee 0.4% x 2 + slippage 10 bps x 2); a newly admitted cohort must beat it, an excluded one must fall short of it
+  costHurdlePct: 1.8,   // the round trip in log-return % (taker 0.8% x 2 + slippage 10 bps x 2); a newly admitted cohort must beat it, an excluded one must fall short of it.
+                        // PUBLISH-FIX-93 (2026-09-21): this FALLBACK still read 1.0 — the old 0.4% fee schedule — after FIX-84 moved the paper account to the real Kraken
+                        // Tier-1 taker of 0.80% per side. fly.js derives the hurdle from the running policy's taker rate (1.8 for this account) so the live learner was
+                        // correct, but any caller that could not read the policy certified moves against a hurdle worth barely half the real cost. Review: "learning and
+                        // outcome reports should use the same complete cost model as execution."
   clusterMs: 3_600_000, // PUBLISH-FIX-83 item 20: looks of one coin inside one hour are one move, one bootstrap cluster
-  minClusters: 12,      // review finding: a cohort must span at least this many coin-hours before it can move a line
+  minClusters: 30,      // a cohort must span at least this many coin-hours (independent draws) before it can move a line.
+                        // PUBLISH-FIX-93 (2026-09-21), review finding: "it can certify a lesson using much less effective evidence than the label implies". At 12, a
+                        // 100-look cohort behind a "1,000 scored looks" headline could rest on twelve coin-hours, and a bootstrap over twelve clusters is a coarse
+                        // distribution that reads confident on noise. 30 is the conventional floor for resampling stability. This can only PREVENT a move, never cause one.
   maxLookbackDays: 30,  // looks older than this are not tests
   bootstraps: 400,
   yardstick: 'continuation', // 15-minute continuation log return (decision-outcome yardstick); 'bite' = 5-minute
@@ -95,12 +102,20 @@ export function testsOf(episodes, outcomes, { yardstick = GATE_LESSON_DEFAULTS.y
     const real = e.gates.filter((g) => g && typeof g.id === 'string' && !NOT_A_GATE.has(g.id));
     for (const g of real) {
       if (!GATE_BANDS[g.id]) continue; const value = num(g.observed); const line = num(g.threshold); if (value === null || line === null) continue;
-      // PUBLISH-FIX-91 (2026-09-20): a look is USABLE for a flow gate when every gate OUTSIDE the flow family passed. Item 20 demanded
-      // every other gate including the other four flow gates, and the flow gates fail together (4-5 at once on most looks): 9-34
-      // usable looks a day per gate against the 1,000 needed — the learner the owner built was starved by that one clause. The
-      // family moves together, so the family is judged together; a structural refusal (range, trend, book, stop) still excludes the look.
-      const othersOk = real.every((x) => x === g || x.ok === true || GATE_BANDS[x.id] !== undefined);
-      out.push({ gate: g.id, setup: String(e.setupType ?? ''), ts: e.decisionTs, coin: e.canonicalCoin, value, line, othersOk, r });
+      // PUBLISH-FIX-93 (2026-09-21) — REVIEW FINDING F1 (revision 34a25ad2), and it reverses PUBLISH-FIX-91 for promotion.
+      // FIX-91 counted a look as USABLE for one flow gate when every gate OUTSIDE the flow family passed, on the reasoning that the
+      // family moves together. But a promotion moves ONE line: with the proposed line in force the other flow gates are still at
+      // theirs, so a look they refused would still not trade. The learner was therefore publishing a line on "newly admitted" looks
+      // that the complete policy rejects — an invalid policy-improvement inference (the reviewer's reproduction: 1,100 looks at
+      // FI15 0.15 with RV60 failing, FI15 published at 0.15, zero of the 1,100 admitted by the full rule set). Our own 48-hour
+      // gate study said the same thing from the other side: across 3,174 scored looks FI15 was NEVER the only refusal.
+      //   othersOk (STRICT, and the only thing promotion may count): every other required gate actually passed. An UNKNOWN gate
+      //   (ok !== true) is never counterfactually passable. familyOk keeps FIX-91's wider set as a REPORTED diagnostic only.
+      // A joint family policy — proposing and forward-testing all five lines together against the complete rule set — is the
+      // honest way to move gates that fail together, and is its own ticket; it is not a single-gate threshold change.
+      const othersOk = real.every((x) => x === g || x.ok === true);
+      const familyOk = real.every((x) => x === g || x.ok === true || GATE_BANDS[x.id] !== undefined);
+      out.push({ gate: g.id, setup: String(e.setupType ?? ''), ts: e.decisionTs, coin: e.canonicalCoin, value, line, othersOk, familyOk, r });
     }
   }
   return out;
@@ -110,9 +125,10 @@ export function testsOf(episodes, outcomes, { yardstick = GATE_LESSON_DEFAULTS.y
 export function evaluateUnit(tests, band, line, cfg, sinceTs = null, { atLine = null } = {}) {
   const T = sinceTs === null ? tests : tests.filter((t) => t.ts > sinceTs);
   const scored = T.length; const usable = T.filter((t) => t.othersOk);
+  const family = T.filter((t) => t.familyOk).length; // PUBLISH-FIX-93: reported so the starvation FIX-91 tried to cure stays visible, never counted
   const admitted = (c) => usable.filter((t) => passes(band.op, t.value, c));
   const cur = admitted(line); const curR = cur.map((t) => t.r);
-  const report = { scored, usable: usable.length, admittedNow: cur.length, meanNow: curR.length ? r4(mean(curR)) : null };
+  const report = { scored, usable: usable.length, family, admittedNow: cur.length, meanNow: curR.length ? r4(mean(curR)) : null };
   // PUBLISH-FIX-83 item 20: USABLE looks (every other gate passed, so this gate alone decided) count toward the minimum, not raw scored
   if (usable.length < cfg.minScored) return { move: null, reason: `USABLE_${usable.length}_OF_${cfg.minScored}`, ...report };
   const candidates = [];
@@ -160,7 +176,7 @@ export function computeGateLesson({ tests, state = null, nowTs = Date.now(), cfg
     const reference = gate === 'RV60' ? (T.filter((t) => t.line !== null).sort((a, b) => a.ts - b.ts)[0]?.line ?? null) : band.reference;
     const inForce = u.published ?? reference; if (inForce === null) continue;
     let ev = evaluateUnit(T, band, inForce, cfg); let movedThisCycle = false;
-    const unit = { gate, setup: key.startsWith('RV60@') ? key.slice(5) : null, reference, inForce, state: 'DORMANT', evidence: { scored: ev.scored, usable: ev.usable, admittedNow: ev.admittedNow, meanNow: ev.meanNow, reason: ev.reason, loosen: ev.loosen ?? null, tighten: ev.tighten ?? null } };
+    const unit = { gate, setup: key.startsWith('RV60@') ? key.slice(5) : null, reference, inForce, state: 'DORMANT', evidence: { scored: ev.scored, usable: ev.usable, family: ev.family, admittedNow: ev.admittedNow, meanNow: ev.meanNow, reason: ev.reason, loosen: ev.loosen ?? null, tighten: ev.tighten ?? null } };
     // 1. a published line is kept under forward test: revert when the looks it admitted since publication turned negative with confidence
     if (u.published !== null && u.before !== null) {
       const fwd = evaluateUnit(T, band, u.before, { ...cfg, minScored: cfg.minForward }, u.publishedTs ?? 0, { atLine: u.published }); /* PUBLISH-FIX-83 item 20: the published line's OWN cohort, forward looks judged by minForward */ const f = fwd.loosen ?? fwd.tighten ?? null;
@@ -207,7 +223,7 @@ export function computeGateLesson({ tests, state = null, nowTs = Date.now(), cfg
 export function gateLessonLine(lesson) {
   if (!lesson || !lesson.units) return 'GATE LEARNING: no lesson yet';
   const keys = Object.keys(lesson.units); if (!keys.length) return `GATE LEARNING: DORMANT — no scored looks joined yet (${lesson.tests ?? 0} tests)`;
-  const parts = keys.map((k) => { const u = lesson.units[k]; const e = u.evidence; const st = u.state === 'PUBLISHED' ? `PUBLISHED ${u.reference}->${u.inForce}` : u.state === 'PROPOSED' ? `PROPOSED ${u.inForce}->${u.proposal?.line} (${u.proposal?.forwardScored ?? 0}/${lesson.cfg.minForward} forward)` : `line ${u.inForce}`; return `${k} ${st}, ${e.scored} scored${e.scored < lesson.cfg.minScored ? ` of ${lesson.cfg.minScored} needed` : ''}, ${e.admittedNow} admitted (mean ${e.meanNow ?? 'n/a'}%)${e.reason && e.reason !== 'SUPPORTED' && e.scored >= lesson.cfg.minScored ? `, ${e.reason}` : ''}`; });
+  const parts = keys.map((k) => { const u = lesson.units[k]; const e = u.evidence; const st = u.state === 'PUBLISHED' ? `PUBLISHED ${u.reference}->${u.inForce}` : u.state === 'PROPOSED' ? `PROPOSED ${u.inForce}->${u.proposal?.line} (${u.proposal?.forwardScored ?? 0}/${lesson.cfg.minForward} forward)` : `line ${u.inForce}`; return `${k} ${st}, ${e.scored} scored, ${e.usable ?? 0} usable${(e.usable ?? 0) < lesson.cfg.minScored ? ` of ${lesson.cfg.minScored} needed` : ''}${(e.family ?? 0) > (e.usable ?? 0) ? ` (${e.family} refused with a sibling flow gate — reported, never counted)` : ''}, ${e.admittedNow} admitted (mean ${e.meanNow ?? 'n/a'}%)${e.reason && e.reason !== 'SUPPORTED' && e.scored >= lesson.cfg.minScored ? `, ${e.reason}` : ''}`; });
   const moved = Object.keys(lesson.lines).length;
   return `GATE LEARNING: ${moved ? `${moved} learned line(s) in force` : 'reference lines in force'} — ${parts.join(' | ')}`;
 }
