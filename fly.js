@@ -32,6 +32,7 @@ import { openPaperRuntime, startDataOnlyRuntime } from './lib/serpent-runtime.js
 import { initPaperAccountAtBoot } from './lib/paper-account-init.js';
 import { logBootSelfCheck, startMemoryReport } from './lib/boot-self-check.js';
 import { startCpuProfileReport } from './lib/cpu-profile-report.js';
+import { startGcReport } from './lib/gc-report.js';
 import { startHeapSampleReport } from './lib/heap-sample-report.js';
 import { startMainThreadWatchdog } from './lib/main-thread-watchdog.js';
 import { createDeepMarketSource } from './market-lab/deep-market-adapter.js';
@@ -117,6 +118,8 @@ if (SERPENT_MODE === 'DATA_ONLY') {
   startMemoryReport({ log: console.log });
   // PUBLISH-FIX-10 diagnostic: opt-in main-thread sampling so a blocked loop names the code that blocked it.
   if (process.env.SERPENT_CPU_PROFILE === 'true') startCpuProfileReport({ log: console.log });
+  // PUBLISH-FIX-115 diagnostic: every garbage-collection pause of 250 ms or more on its own line (the 13 s blocks of 3047a8da had no name).
+  if (process.env.SERPENT_GC_REPORT !== 'false') startGcReport({ log: console.log });
   // PUBLISH-FIX-15 diagnostic: opt-in live-retention sampling so a growing heap names the allocation sites holding it.
   if (process.env.SERPENT_HEAP_SAMPLE === 'true') startHeapSampleReport({ log: console.log });
   // PUBLISH-FIX-10 diagnostic: a worker thread reports, from outside the loop, what a stalled main thread is stuck in.
