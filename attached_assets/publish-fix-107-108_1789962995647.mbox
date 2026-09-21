@@ -1,0 +1,357 @@
+From 31099438f95a124d9c42003cf3c1a15c256288a9 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 21 Sep 2026 03:48:01 +0000
+Subject: [PATCH 1/2] PUBLISH-FIX-107: the learner can start - minScored 1000
+ -> 300
+
+Owner directive 2026-09-21 (David): "If you think dropping from 1000 to
+300 speeds us go for it !!"
+
+minScored is how many SCORED looks a gate needs before the learner may
+even PROPOSE moving its line. The 1000 was set on 09-19 - before
+PUBLISH-FIX-92 found the maturation sweep silently stalled: 6,941 judge
+looks in 48 hours with ZERO outcome rows, because a settlement row was
+dropped as a duplicate of the row it settled. So for the whole life of
+the gate learner, nothing was ever counted toward the thousand. That
+number was not cautious, it was moot.
+
+With the grader working, 300 is reachable in days instead of weeks.
+
+Exactly one number moved. Untouched: minCohort 100, minForward 100
+looks scored AFTER the proposal, bootstrap confidence 0.9 that the
+admitted looks' 15-minute return does not fall, one step per gate per
+cycle, inside the gate's own fixed band, PROPOSED -> forward-tested ->
+PUBLISHED, REVERTED if a published line stops holding, every move one
+line in the log, DEGRADE so a failing learner never blocks the run.
+
+test/publish-fix-107-learner-can-start.test.js (5) proves it is one
+number: the other four guards, the derived environment, that the Judge's
+bands and the learner's bands are the SAME bands for exactly the five
+flow lines, and that the learner has no idea what REWARD_RISK_MIN,
+scenarioStressedLoss or the size ladder are.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01RoFoPS22WFW1oUnbWzPayd
+---
+ config/paper-runtime.json                     |  2 +-
+ .../publish-fix-107-learner-can-start.test.js | 62 +++++++++++++++++++
+ 2 files changed, 63 insertions(+), 1 deletion(-)
+ create mode 100644 test/publish-fix-107-learner-can-start.test.js
+
+diff --git a/config/paper-runtime.json b/config/paper-runtime.json
+index cc1e1fc..51c3149 100644
+--- a/config/paper-runtime.json
++++ b/config/paper-runtime.json
+@@ -82,7 +82,7 @@
+    "judge": { "desiredState": "ON", "blockerPolicy": "BLOCK_PAPER", "module": "judge/composition.js", "mode": "PAPER", "enableEnv": "JUDGE_ENABLED", "policyFile": "config/judge.paper.starting-styles-fee080.json", "accountId": "paper-starting-styles-usd500-fee080-wide20", "authority": "PAPER_SIMULATION_ONLY" },
+    "neverWatch": { "desiredState": "ON", "blockerPolicy": "DEGRADE", "module": "lib/never-watch.js", "env": "JUDGE_NEVER_WATCH", "bases": ["BTC", "ETH", "SOL", "LTC"], "note": "PUBLISH-FIX-76, owner directive 2026-09-19 (David: 'BTC and ETH should never even be seen by us'); PUBLISH-FIX-77 adds SOL and LTC: of the 28 cage-blocked bites graded 2026-09-19, every FLAT one was BTC / ETH / SOL / LTC — the big coins do not move 0.8% in 15 minutes, so they cannot pay the round trip: these bases are dropped from every Judge nomination source (universe, volatility watch, re-look, scout) before the Judge hears of them; the tape still carries their books as market context." },
+    "secondLook": { "desiredState": "ON", "blockerPolicy": "DEGRADE", "module": "judge/judge.js", "env": ["JUDGE_SECOND_LOOK_AFTER_MS", "JUDGE_SECOND_LOOK_MAX"], "afterMs": 180000, "maxLooks": 2, "note": "PUBLISH-FIX-79, owner directive 2026-09-19 (David: 'fix the thing that will make him miss the winners'): a look refused ONLY on buying-pressure gates (FI15, FI60_POSITIVE, RV60, the absorption priors) is retaken 3 minutes later at the same level if the coin still holds it — a fresh crossing, a fresh lock, every gate at full strength — up to 2 times per chain. No threshold moves. Set OFF for the baseline Judge." },
+-   "gateLearning": { "desiredState": "ON", "blockerPolicy": "DEGRADE", "module": "learning/gate-lesson.js", "env": ["JUDGE_GATE_LEARNING", "JUDGE_GATE_MIN_SCORED", "JUDGE_GATE_MIN_COHORT", "JUDGE_GATE_MIN_FORWARD", "JUDGE_GATE_CONFIDENCE", "JUDGE_GATE_COST_HURDLE_PCT"], "minScored": 1000, "minCohort": 100, "minForward": 100, "confidence": 0.9, "note": "PUBLISH-FIX-82, owner directive 2026-09-19 (David: 'I want him to move the gate once it's tested enough — thousands and thousands of tests — without me having to say so'): the Judge's flow lines (FI15, FI60_POSITIVE, RV60, RECLAIM_FI15, FI15_FRESH_AT_D; judge/setups.js LEARNABLE_GATES, each inside a fixed band) are moved by his own scored looks: a move needs minScored scored looks on the gate, minCohort in the cohort it changes and bootstrap confidence the admitted looks' 15-minute return does not fall; it is PROPOSED, forward-tested on minForward looks scored after the proposal, then PUBLISHED; a published line that stops holding is REVERTED. One step per gate per cycle; the study runs every 30 minutes in a child process. Every move is one line in the log. Set OFF for the reference lines." },
++   "gateLearning": { "desiredState": "ON", "blockerPolicy": "DEGRADE", "module": "learning/gate-lesson.js", "env": ["JUDGE_GATE_LEARNING", "JUDGE_GATE_MIN_SCORED", "JUDGE_GATE_MIN_COHORT", "JUDGE_GATE_MIN_FORWARD", "JUDGE_GATE_CONFIDENCE", "JUDGE_GATE_COST_HURDLE_PCT"], "minScored": 300, "minCohort": 100, "minForward": 100, "confidence": 0.9, "note": "PUBLISH-FIX-107 (owner directive 2026-09-21, David: 'If you think dropping from 1000 to 300 speeds us go for it'): minScored 1000 -> 300. The 1000 was set before PUBLISH-FIX-92, when the maturation sweep was silently stalled — 6,941 judge looks in 48 h with ZERO outcome rows — so nothing was ever being counted toward it. With the grader working, 300 scored looks on a gate is reachable in days instead of weeks, and every other guard is untouched: minCohort 100, minForward 100 forward-tested looks scored AFTER the proposal, bootstrap confidence 0.9 that the admitted looks' 15-minute return does not fall, one step per gate per cycle, inside the gate's fixed band, PROPOSED -> forward-tested -> PUBLISHED, and REVERTED if a published line stops holding. Original PUBLISH-FIX-82, owner directive 2026-09-19 (David: 'I want him to move the gate once it's tested enough — thousands and thousands of tests — without me having to say so'): the Judge's flow lines (FI15, FI60_POSITIVE, RV60, RECLAIM_FI15, FI15_FRESH_AT_D; judge/setups.js LEARNABLE_GATES, each inside a fixed band) are moved by his own scored looks: a move needs minScored scored looks on the gate, minCohort in the cohort it changes and bootstrap confidence the admitted looks' 15-minute return does not fall; it is PROPOSED, forward-tested on minForward looks scored after the proposal, then PUBLISHED; a published line that stops holding is REVERTED. One step per gate per cycle; the study runs every 30 minutes in a child process. Every move is one line in the log. Set OFF for the reference lines." },
+    "latchClearAtBoot": { "desiredState": "ON", "blockerPolicy": "DEGRADE", "module": "lib/latch-clear-at-boot.js", "env": "SERPENT_CLEAR_LATCHES_AT_BOOT", "note": "PUBLISH-FIX-75, owner directive 2026-09-19 (David: 'let's get rid of it and anything that could get in the way'): a standing KILL / CAGE latch is cleared at every paper boot under owner intent (this row + SERPENT_CONTROL_PASSWORD present), through the exact cockpit CLEAR path; vetoes untouched. Set OFF to let a latch stand across boots again." }
+   },
+   "watch": {
+diff --git a/test/publish-fix-107-learner-can-start.test.js b/test/publish-fix-107-learner-can-start.test.js
+new file mode 100644
+index 0000000..df33d08
+--- /dev/null
++++ b/test/publish-fix-107-learner-can-start.test.js
+@@ -0,0 +1,62 @@
++// PUBLISH-FIX-107 (2026-09-21, owner directive). David: "If you think dropping from 1000 to 300 speeds us go for it !!"
++//
++// `minScored` is how many SCORED looks a gate needs before the learner may even PROPOSE moving its line. It was 1000, and it
++// was set on 2026-09-19 — before PUBLISH-FIX-92 found that the maturation sweep was silently stalled: 6,941 judge looks in
++// 48 hours with ZERO outcome rows, because a settlement row was being dropped as a duplicate of the row it settled. So for the
++// whole life of the gate learner, nothing was ever being counted toward the thousand. The number was not cautious, it was moot.
++//
++// With the grader working, 300 is reachable in days instead of weeks. NOTHING else about the law moves, and this drill exists to
++// prove that: the change must be exactly one number.
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import { readFileSync } from 'node:fs';
++import { loadProfile, applyProfileEnvironment } from '../paper/profile.js';
++
++const laneOf = () => JSON.parse(readFileSync('config/paper-runtime.json', 'utf8')).groups.judge.gateLearning;
++
++test('FIX107-1: the learner may start at 300 scored looks, not 1000', () => {
++  assert.equal(laneOf().minScored, 300);
++});
++
++test('FIX107-2: every OTHER guard is untouched — this is one number, not a loosening', () => {
++  const g = laneOf();
++  assert.equal(g.desiredState, 'ON');
++  assert.equal(g.minCohort, 100, 'still 100 looks in the cohort the change affects');
++  assert.equal(g.minForward, 100, 'still 100 looks scored AFTER the proposal before it may publish');
++  assert.equal(g.confidence, 0.9, 'still bootstrap confidence that the admitted looks\' 15-minute return does not fall');
++  assert.equal(g.module, 'learning/gate-lesson.js');
++  assert.equal(g.blockerPolicy, 'DEGRADE', 'a failing learner degrades; it never blocks the paper run');
++});
++
++test('FIX107-3: the profile derives it, so the running app sees 300', () => {
++  const env = {}; applyProfileEnvironment(loadProfile(), env);
++  assert.equal(env.JUDGE_GATE_MIN_SCORED, '300');
++  assert.equal(env.JUDGE_GATE_MIN_COHORT, '100');
++  assert.equal(env.JUDGE_GATE_MIN_FORWARD, '100');
++  assert.equal(env.JUDGE_GATE_CONFIDENCE, '0.9');
++  assert.equal(env.JUDGE_GATE_LEARNING, 'true');
++});
++
++test('FIX107-4: what the learner is allowed to touch has NOT widened', async () => {
++  const { LEARNABLE_GATES } = await import('../judge/setups.js');
++  const { GATE_BANDS } = await import('../learning/gate-lesson.js');
++  const FIVE = ['FI15', 'FI60_POSITIVE', 'RV60', 'RECLAIM_FI15', 'FI15_FRESH_AT_D'];
++  assert.deepEqual(Object.keys(LEARNABLE_GATES).sort(), [...FIVE].sort(), 'exactly the five flow lines, no more');
++  assert.deepEqual(Object.keys(GATE_BANDS).sort(), [...FIVE].sort(), 'and the learner knows exactly those five');
++  for (const id of FIVE) {
++    const b = GATE_BANDS[id];
++    assert.ok(Number.isFinite(b.min) && Number.isFinite(b.max) && b.min < b.max, `${id} has a fixed band`);
++    assert.deepEqual({ min: b.min, max: b.max, step: b.step, op: b.op }, { min: LEARNABLE_GATES[id].min, max: LEARNABLE_GATES[id].max, step: LEARNABLE_GATES[id].step, op: LEARNABLE_GATES[id].op }, `${id}: the Judge's band and the learner's band are the same band`);
++  }
++  // the cost law, the stop and sizing are outside the learner entirely
++  const lesson = readFileSync('learning/gate-lesson.js', 'utf8');
++  for (const forbidden of ['REWARD_RISK_MIN', 'scenarioStressedLoss', 'size-ladder']) {
++    assert.equal(lesson.includes(forbidden), false, `the learner has no idea what ${forbidden} is`);
++  }
++});
++
++test('FIX107-5: the reason is recorded where the number lives, so nobody has to guess why', () => {
++  const note = String(laneOf().note ?? '');
++  assert.match(note, /PUBLISH-FIX-107/);
++  assert.match(note, /PUBLISH-FIX-92/, 'and it names the stall that made 1000 meaningless');
++});
+-- 
+2.43.0
+
+
+From 8643ff13af9c901cf57a695892e801cc540bcd6a Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 21 Sep 2026 03:56:31 +0000
+Subject: [PATCH 2/2] PUBLISH-FIX-108: a 5-second stall with its own stack
+ trace - tail reads
+
+Production, deployment eb532bba, 03:41:
+
+  MAIN THREAD STALLED 5s: running JavaScript (CPU-bound on the main thread)
+  MAIN THREAD STACK (paused): canonicalDigest learning/contracts.js:53:39
+                              <- patternRecordError learning/contracts.js:2...
+  CPU LOAD 60s: busy 58784ms idle 1845ms (event-loop utilization 97%)
+
+The learning store caches each journal keyed on the file's SIZE. Any
+growth the cache did not itself make - the bucket restore, the gate
+study's child process, a sweep that appended more than the cache saw -
+threw the WHOLE cache away and re-read and re-VALIDATED every record
+from byte zero. patternRecordError alone recomputes two SHA-256
+canonical digests per record, and these journals hold tens of thousands
+of records. Against a 500 ms receipt-to-decision limit and a 10 s
+proposal law, that stall can eat a bite outright.
+
+These journals are append-only, so growth means new lines at the end.
+cachedRows now reads and validates only the TAIL and extends the cache.
+Every new record is validated exactly as before - nothing is trusted
+unread; only the re-validation of records already read is gone. The
+derived indexes are dropped so they rebuild lazily without any crypto.
+Anything that is not clean append-only growth - a shrink, an offset
+that is not a line boundary, a torn final line - falls back to the full
+re-read it always did. Tail reads and full re-reads are both counted.
+
+This is the same class PUBLISH-FIX-45 fixed for appendOutcome and
+PUBLISH-FIX-83 item 24 fixed for patterns; the remaining hole was
+growth by another writer.
+
+Fenced by test/publish-fix-108-tail-read.test.js (5), whose fixture is
+asserted to be accepted so the drill cannot silently skip its own
+mechanism: external append == full re-read row for row, a torn line is
+never half a record, a shrink falls back, and the journals are still
+append-only with nothing deleted.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01RoFoPS22WFW1oUnbWzPayd
+---
+ learning/store.js                      |  48 ++++++++++-
+ test/publish-fix-108-tail-read.test.js | 105 +++++++++++++++++++++++++
+ 2 files changed, 151 insertions(+), 2 deletions(-)
+ create mode 100644 test/publish-fix-108-tail-read.test.js
+
+diff --git a/learning/store.js b/learning/store.js
+index 7ab0aa0..ad137ca 100644
+--- a/learning/store.js
++++ b/learning/store.js
+@@ -4,7 +4,7 @@
+ // repaired in place and nothing is deleted. Reads are bounded. The store owns bytes only; meaning lives in the
+ // pure modules that produce and consume these records.
+ import path from 'node:path';
+-import { existsSync, mkdirSync, readdirSync, readFileSync, createReadStream, statSync, openSync, fsyncSync, closeSync } from 'node:fs';
++import { existsSync, mkdirSync, readdirSync, readFileSync, createReadStream, statSync, openSync, fsyncSync, closeSync, readSync, fstatSync } from 'node:fs';
+ import { createInterface } from 'node:readline';
+ import { appendJsonl, atomicWriteJson, readJsonl, readJsonBounded } from '../lib/jsonl.js';
+ import {
+@@ -79,10 +79,54 @@ export function createLearningStore({ dataDir, log = () => {} }) {
+   // maintained on append; a size check against the file catches another writer and rebuilds. Same records, same laws.
+   const cached = new Map(); // stream -> { rows, bytes }
+   const fileBytes = (stream) => { try { return statSync(fileOf(stream)).size; } catch { return 0; } };
++  // PUBLISH-FIX-108 (2026-09-21). The cache is keyed on the file's SIZE, so any growth it did not itself make — the bucket
++  // restore, the gate study's child process, a sweep that appended more than the cache saw — threw the WHOLE cache away and
++  // re-read and re-validated every record from byte zero. Validation is not cheap: patternRecordError alone recomputes two
++  // SHA-256 canonical digests per record (learning/contracts.js), and these files hold tens of thousands of records.
++  // Production, deployment eb532bba at 03:41:
++  //     MAIN THREAD STALLED 5s: running JavaScript (CPU-bound on the main thread)
++  //     MAIN THREAD STACK (paused): canonicalDigest learning/contracts.js:53:39 <- patternRecordError learning/contracts.js:2…
++  //     CPU LOAD 60s: busy 58784ms idle 1845ms (event-loop utilization 97%)
++  // A five-second stall on the lane that carries the bite, against a 500 ms receipt-to-decision limit and a ten-second
++  // proposal law. These journals are APPEND-ONLY, so growth means new lines at the end: read and validate only the TAIL and
++  // extend the cache. Every new record is validated exactly as before — nothing is trusted unread — and the derived indexes
++  // are dropped so they rebuild lazily without any crypto. Anything that is not clean append-only growth (a shrink, or an
++  // offset that is not a line boundary) falls back to the full re-read it always did.
+   function cachedRows(stream) {
+     const bytes = fileBytes(stream); const c = cached.get(stream);
+     if (c && c.bytes === bytes) return c.rows;
+-    const rows = readValidated(stream); cached.set(stream, { rows, bytes, byId: null }); return rows;
++    if (c && Number.isSafeInteger(c.bytes) && bytes > c.bytes) {
++      const added = readValidatedTail(stream, c.bytes);
++      if (added !== null) { for (const r of added) c.rows.push(r); c.bytes = bytes; c.byId = null; c.latest = null; c.heads = null; counters.tailReads = (counters.tailReads ?? 0) + 1; counters.tailRows = (counters.tailRows ?? 0) + added.length; return c.rows; }
++    }
++    const rows = readValidated(stream); cached.set(stream, { rows, bytes, byId: null }); counters.fullReads = (counters.fullReads ?? 0) + 1; return rows;
++  }
++  // the bytes appended since `fromByte`, validated exactly like a full read. null means "not clean append-only growth" and the
++  // caller re-reads everything: the previous byte must be the newline that ended the last cached record, and the tail must end
++  // on a line boundary (a half-written final line is left for the next pass rather than parsed).
++  function readValidatedTail(stream, fromByte) {
++    const file = fileOf(stream); const validator = VALIDATORS[stream] ?? null;
++    let fd = null;
++    try {
++      fd = openSync(file, 'r');
++      if (fromByte > 0) { const prev = Buffer.alloc(1); if (readSync(fd, prev, 0, 1, fromByte - 1) !== 1 || prev[0] !== 0x0a) return null; }
++      const size = fstatSync(fd).size; if (size < fromByte) return null;
++      const len = size - fromByte; if (len === 0) return [];
++      const buf = Buffer.alloc(len); let off = 0;
++      while (off < len) { const n = readSync(fd, buf, off, len - off, fromByte + off); if (n <= 0) break; off += n; }
++      if (off !== len) return null;
++      const text = buf.subarray(0, off).toString('utf8');
++      if (!text.endsWith('\n')) return null; // a torn final line: fall back rather than parse half a record
++      const out = [];
++      for (const line of text.split('\n')) {
++        const t = line.trim(); if (!t) continue;
++        let rec; try { rec = JSON.parse(t); } catch { counters.corruptSkipped += 1; continue; }
++        if (validator) { const err = validator(rec); if (err) { counters.invalidRejected += 1; log(`learning store: withheld invalid ${stream} record (${err})`); continue; } }
++        out.push(rec);
++      }
++      return out;
++    } catch { return null; }
++    finally { if (fd !== null) { try { closeSync(fd); } catch { /* closed once */ } } }
+   }
+   // maintained only when the file was exactly where the cache left it; another writer in between drops the cache
+   function noteAppended(stream, record, bytesBefore) { const c = cached.get(stream); if (!c) return; if (c.bytes !== bytesBefore) { cached.delete(stream); return; } c.rows.push(record); c.bytes = fileBytes(stream); c.heads = null; if (c.latest && record.opportunityId) { const prev = c.latest.get(record.opportunityId); if (!prev || record.attachedTs > prev.attachedTs) c.latest.set(record.opportunityId, record); } if (c.byId && record.opportunityId) { const l = c.byId.get(record.opportunityId); if (l) l.push(record); else c.byId.set(record.opportunityId, [record]); } }
+diff --git a/test/publish-fix-108-tail-read.test.js b/test/publish-fix-108-tail-read.test.js
+new file mode 100644
+index 0000000..40d34bb
+--- /dev/null
++++ b/test/publish-fix-108-tail-read.test.js
+@@ -0,0 +1,105 @@
++// PUBLISH-FIX-108 (2026-09-21). A five-second stall on the lane that carries the bite, with its own stack trace.
++//
++// Production, deployment eb532bba, 03:41:
++//     MAIN THREAD STALLED 5s: running JavaScript (CPU-bound on the main thread)
++//     MAIN THREAD STACK (paused): canonicalDigest learning/contracts.js:53:39 <- patternRecordError learning/contracts.js:2…
++//     CPU LOAD 60s: busy 58784ms idle 1845ms (event-loop utilization 97%)
++//
++// The learning store caches each journal keyed on the file's SIZE. Any growth the cache did not itself make — the bucket
++// restore, the gate study's child process, a sweep that appended more than the cache saw — dropped the whole cache and
++// re-read and re-VALIDATED every record from byte zero. `patternRecordError` alone recomputes two SHA-256 canonical digests
++// per record, and these journals hold tens of thousands of records. Against a 500 ms receipt-to-decision limit and a
++// ten-second proposal law, that stall can eat a bite outright.
++//
++// These journals are append-only, so growth means new lines at the end. The cache now reads and validates only the TAIL.
++// Every new record is validated exactly as before; only the re-validation of records already read is gone.
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import { mkdtempSync, rmSync, appendFileSync, writeFileSync, readFileSync } from 'node:fs';
++import { tmpdir } from 'node:os';
++import path from 'node:path';
++import { createLearningStore, learningDir } from '../learning/store.js';
++
++const withStore = (fn) => {
++  const dir = mkdtempSync(path.join(tmpdir(), 'serpent-fix108-'));
++  try { return fn({ dir, store: createLearningStore({ dataDir: dir, log: () => {} }), file: path.join(learningDir(dir), 'episodes.jsonl') }); }
++  finally { rmSync(dir, { recursive: true, force: true }); }
++};
++
++const { buildEpisode } = await import('../learning/capture.js');
++const { BASELINE_RULE_VERSION } = await import('../learning/contracts.js');
++const T0 = 1_789_000_000_000;
++const EP = (i) => buildEpisode({
++  canonicalCoin: 'AAA', decisionTs: T0 + i * 60_000, usableAtTs: T0 + i * 60_000, datasetId: 'fix108',
++  mode: 'HISTORICAL_REPLAY', evidenceBasis: 'HISTORICAL_RECONSTRUCTION', fidelity: 'CANDLE_DESCRIPTIVE',
++  featureSet: { features: {} }, gates: [], decision: 'NO_SETUP', baselineRuleVersion: BASELINE_RULE_VERSION,
++});
++
++// the fixture MUST be accepted — a drill that quietly skips its own mechanism is worse than no drill
++function seed(store, n) {
++  let appended = 0;
++  for (let i = 0; i < n; i += 1) if (store.appendEpisode(EP(i)).appended === true) appended += 1;
++  assert.equal(appended, n, 'every fixture episode was appended');
++  return appended;
++}
++
++test('FIX108-1: growth this store did NOT make is picked up, and the rows are exactly what a full re-read would give', () => {
++  withStore(({ dir, store, file }) => {
++    seed(store, 12);
++    const before = store.readEpisodes().length;
++    // ANOTHER writer appends — exactly what the gate study's child process or the bucket restore does
++    appendFileSync(file, `${JSON.stringify(EP(999))}\n`); // a VALID record this store instance never saw
++    const after = store.readEpisodes();
++    assert.equal(after.length, before + 1, 'the externally appended record is there');
++    // and a brand-new store reading the same file from scratch agrees, row for row
++    const fresh = createLearningStore({ dataDir: dir, log: () => {} }).readEpisodes();
++    assert.deepEqual(after.map((r) => r.opportunityId), fresh.map((r) => r.opportunityId), 'tail-extended cache == full re-read');
++  });
++});
++
++test('FIX108-2: a TORN final line is not parsed — the pass falls back and the record appears once it is whole', () => {
++  withStore(({ dir, store, file }) => {
++    seed(store, 6);
++    const before = store.readEpisodes().length;
++    const line = JSON.stringify(EP(777));
++    appendFileSync(file, line.slice(0, Math.floor(line.length / 2))); // half a record, no newline
++    assert.equal(store.readEpisodes().length, before, 'half a record is never a record');
++    appendFileSync(file, `${line.slice(Math.floor(line.length / 2))}\n`); // completed
++    assert.equal(store.readEpisodes().length, before + 1, 'and it appears once it is whole');
++    const fresh = createLearningStore({ dataDir: dir, log: () => {} }).readEpisodes();
++    assert.equal(fresh.length, before + 1, 'a cold read agrees');
++  });
++});
++
++test('FIX108-3: a file that SHRINKS or is rewritten falls back to the full read it always did', () => {
++  withStore(({ dir, store, file }) => {
++    seed(store, 8);
++    const all = readFileSync(file, 'utf8').trim().split('\n');
++    assert.ok(store.readEpisodes().length >= 1);
++    writeFileSync(file, `${all.slice(0, 2).join('\n')}\n`); // rewritten shorter
++    const after = store.readEpisodes();
++    assert.equal(after.length, 2, 'the cache did not keep rows the file no longer has');
++    const fresh = createLearningStore({ dataDir: dir, log: () => {} }).readEpisodes();
++    assert.deepEqual(after.map((r) => r.opportunityId), fresh.map((r) => r.opportunityId));
++  });
++});
++
++test('FIX108-4: the mechanism is a TAIL read, not a re-read — the source says so and counts it', () => {
++  const src = readFileSync('learning/store.js', 'utf8');
++  assert.match(src, /function readValidatedTail\(stream, fromByte\)/, 'the tail reader exists');
++  assert.match(src, /prev\[0\] !== 0x0a\) return null;/, 'it refuses an offset that is not a line boundary');
++  assert.match(src, /if \(!text\.endsWith\('\\n'\)\) return null;/, 'and a torn final line');
++  assert.match(src, /counters\.tailReads/, 'tail reads are counted');
++  assert.match(src, /counters\.fullReads/, 'and so are the full re-reads it avoids');
++  // every appended record is still validated — the saving is only on records already read
++  const tail = src.slice(src.indexOf('function readValidatedTail'));
++  assert.match(tail.slice(0, 1600), /if \(validator\) \{ const err = validator\(rec\); if \(err\)/, 'the tail is validated exactly like a full read');
++});
++
++test('FIX108-5: nothing about the journals themselves changed — still append-only, still validated on read', () => {
++  const src = readFileSync('learning/store.js', 'utf8');
++  assert.match(src, /Append-only JSONL journals with revalidation on read/);
++  assert.equal(src.includes('unlinkSync'), false, 'the store still deletes nothing');
++  assert.match(src, /counters\.corruptSkipped \+= 1/, 'a torn line is still skipped and counted');
++  assert.match(src, /counters\.invalidRejected \+= 1/, 'an invalid record is still withheld and counted');
++});
+-- 
+2.43.0
+
