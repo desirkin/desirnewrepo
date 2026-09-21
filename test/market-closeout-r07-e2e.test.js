@@ -338,5 +338,5 @@ test('MC-E07 (joined). existing integrations are preserved: a populated Social-l
   for (const f of ['evidence/contract.js', 'socrates/contract.js']) { const head = execFileSync('git', ['show', `HEAD:${f}`], { cwd: REPO }); assert.equal(sha256Hex(readFileSync(path.join(REPO, f))), sha256Hex(head), `${f} unchanged`); }
   // cobra.config.json: PUBLISH-FIX-2 (2026-09-15) emptied the legacy named-coin universe seed to [] so no hardcoded
   // coins live in any config; the retained operator paper base stays $500 (db4b1a2). Pin the new reviewed bytes.
-  assert.equal(sha256Hex(readFileSync(path.join(REPO, 'cobra.config.json'))), 'f44d5d8657e3fe391194fccb204a7599ec7ed9f4d40eabdb064bd8cf328954d7'); // PUBLISH-FIX-83 item 38: maxHeapMb 3000, one value with the profile (was c8f956c4… PUBLISH-FIX-66)
+  assert.equal(sha256Hex(readFileSync(path.join(REPO, 'cobra.config.json'))), '9113077bfe1cbb0d8f9e583671d0fc86870c8c0b1092ba69716e4e12265aa884'); // PUBLISH-FIX-99: hotLane.slots 6 -> 20 (was f44d5d86…, PUBLISH-FIX-83 item 38: maxHeapMb 3000, one value with the profile (was c8f956c4… PUBLISH-FIX-66)
 });
