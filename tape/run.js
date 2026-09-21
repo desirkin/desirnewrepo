@@ -545,10 +545,10 @@ export async function runTape({ minutes = null, chaosAfterSec = null, log = cons
     const heapMb = process.memoryUsage().heapUsed / 1024 / 1024;
     const pinned = pinnedSymbols();
     const sheddable = [...pairs.values()].filter((p) => !unavailable.has(p.symbol) && !pinned.has(p.symbol)); // held / pending exposure is never shed; caps stay
-    const d = resourceLaw.decide({ heapMb, lagMs, nowTs: now, sheddable: sheddable.map((p) => ({ symbol: p.symbol, coin: p.coin, usdVol24h: p.usdVol24h ?? 0 })) });
+    const d = resourceLaw.decide({ heapMb, lagMs, nowTs: now, sheddable: sheddable.map((p) => ({ symbol: p.symbol, coin: p.coin, usdVol24h: p.usdVol24h ?? 0, fit: p.hot === true && Number.isFinite(p.hotScore) ? p.hotScore : null })) }); // PUBLISH-FIX-110: the fit the hot lane recorded (PUBLISH-FIX-98); the static base universe carries none and is shed first
     if (d.action === 'SHED') {
       writeEvent('RESOURCE_WARNING', { heapMb: Math.round(heapMb), loopLagMs: Math.round(lagMs), reason: d.reason, shedding: d.shed.map((p) => p.symbol) });
-      log(`[${nowIso()}] RESOURCE_WARNING heap=${heapMb.toFixed(0)}MB lag=${lagMs.toFixed(0)}ms (${d.reason}) — shedding ${d.shed.length} lowest-volume pairs: ${d.shed.map((p) => p.coin).join(' ')}`);
+      log(`[${nowIso()}] RESOURCE_WARNING heap=${heapMb.toFixed(0)}MB lag=${lagMs.toFixed(0)}ms (${d.reason}) — shedding ${d.shed.length} LEAST-FIT pairs (runners last, PUBLISH-FIX-110): ${d.shed.map((p) => `${p.coin}${Number.isFinite(p.fit) ? ` fit ${p.fit}` : ''}`).join(' ')}`);
       for (const p of d.shed) {
         unsubscribePair(p.symbol);
         unavailable.add(p.symbol);
