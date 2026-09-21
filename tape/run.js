@@ -180,7 +180,12 @@ export async function runTape({ minutes = null, chaosAfterSec = null, log = cons
     } catch (err) { log(`[${nowIso()}] HOT LANE degraded (tape unaffected): ${String(err?.message ?? err).slice(0, 160)}`); }
     finally { hotLaneBusy = false; }
   }
-  const hotLaneTimer = setInterval(() => { adoptHotNominations().catch(() => {}); }, 60_000);
+  // PUBLISH-FIX-102 (2026-09-21): the volatility watch writes its picks every 30 s; this lane adopted them every 60 s, so a coin that
+  // started running could stand outside the deep tape for up to a minute while the Judge, nominated from the same picks, refused it
+  // FEED_NOT_IN_TAPE_UNIVERSE (the top live refusal). Fifteen seconds closes the window to a quarter of what it was. The pass is cheap
+  // when there is nothing to do: with no stale slot and no unseen nominee it returns above before any REST call or universe rewrite,
+  // and `hotLaneBusy` still makes a slow pass skip rather than pile up.
+  const hotLaneTimer = setInterval(() => { adoptHotNominations().catch(() => {}); }, 15_000);
 
   // ---- PUBLISH-FIX-52: startup universe deadline, retry, and the TAPE DOWN watchdog (tape/startup.js) ------------------
   let universeLoaded = false;

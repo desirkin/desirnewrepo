@@ -521,7 +521,16 @@ export function createJudge({ accountId, policy, policyDigest, dispatcher, feed,
     // challenger verdicts (focused completion §5) computed from REAL inputs at D through the production feature functions: an arm admits only
     // on its declared law (D1 KNOWN ALLOW, D2 KNOWN ALLOW / NO_RULE, D3 KNOWN ALLOW); UNKNOWN never admits; every verdict is a closed record
     let verdicts = null; if (armRule?.challengers?.length) { const ch = challengerVerdicts({ c, D, snap, fast, found, e, fee, setupId, episodeId, frozen }); verdicts = ch.verdicts; if (ch.blocked.length) { tracker.decide('ENTRY_REFUSED', now()); return recordRefusal(c, setupId, episodeId, 'ENTRY_REFUSED', ch.blocked, snap, { inputMode, caseRefs, measurements, invalidation: setup.invalidation, scenario: { target: setup.scenario.target, cappedBy: setup.scenario.cappedBy?.price ?? null, kind: 'SCENARIO_NOT_FORECAST' }, valuationRef, sizing, verdicts }); } }
-    if (!admission.ok) { tracker.decide('ENTRY_REFUSED', now()); return recordRefusal(c, setupId, episodeId, 'ENTRY_REFUSED', admission.reasons, snap, { inputMode, caseRefs, measurements, invalidation: setup.invalidation, scenario: { target: setup.scenario.target, cappedBy: setup.scenario.cappedBy?.price ?? null, kind: 'SCENARIO_NOT_FORECAST' }, valuationRef, sizing, verdicts }); }
+    if (!admission.ok) {
+      // PUBLISH-FIX-102 (2026-09-21): a look that passed every gate AND found a size and is then refused by a RESTRICTION is the
+      // loudest thing that can happen short of a bite, and it left one word in the ledger. Between 2026-09-17 19:28 and
+      // 2026-09-19 13:24 the CAGE ate 28 of these and the owner was never told, on any line, that a control of his was the reason.
+      counters.restrictionRefusals = (counters.restrictionRefusals ?? 0) + 1;
+      counters.restrictionReasons = counters.restrictionReasons ?? {};
+      for (const r of admission.reasons) if (counters.restrictionReasons[r] !== undefined || Object.keys(counters.restrictionReasons).length < 24) counters.restrictionReasons[r] = (counters.restrictionReasons[r] ?? 0) + 1;
+      log(`RESTRICTION BLOCKED A BITE: ${c.symbol} ${setupId} passed every gate and found a size (${found.q} at ${e.entryLimitPrice}, risk ${e.scenarioStressedLoss}) — refused by ${admission.reasons.join(', ')}. This is a CONTROL, not the market: it stays until the owner clears it.`);
+      tracker.decide('ENTRY_REFUSED', now()); return recordRefusal(c, setupId, episodeId, 'ENTRY_REFUSED', admission.reasons, snap, { inputMode, caseRefs, measurements, invalidation: setup.invalidation, scenario: { target: setup.scenario.target, cappedBy: setup.scenario.cappedBy?.price ?? null, kind: 'SCENARIO_NOT_FORECAST' }, valuationRef, sizing, verdicts });
+    }
     const adaptiveRank = resolveAdaptiveRanking({ c, setupId, D, snap, evaluation: e });
     if (adaptiveRank) measurements = [...measurements, adaptiveRank.measurement];
     // ranked admission: wait for this pass's batch to be ordered, then re-admit against the state the earlier winners left behind

@@ -338,7 +338,7 @@ test('SCOPE-8 (9/10). protected surfaces are byte-identical to 9c17372; authorit
     //   (c) hotLane.tenureMs (a two-hour lease) -> hotLane.minHoldMs (a thrash guard), and retryable skips are no longer logged
     //       every minute. Tests: test/publish-fix-96-nothing-stale-blocks.test.js (5; all fail on the previous code),
     //       test/tape-hot-lane.test.js.
-    'tape/run.js': '4e35ceac2bd000409c04154c41708929b0a15dcb6a22d6bfdf25fcdbb6f4f1f6',
+    'tape/run.js': '04e0adcecda472381e5d725f48e9fdda869cbba7dbc9f074ca4fa39b63cab3e3',
     'rumor2/providers/x-official.js': '19d71247854289e5c8ee3c2f2ba0996ace78688c85bae88f160403cd2748ce0a',
     'rumor2/social-time.js': '414f5101723cc8f77ae9c99a6477dbd68f1eeac6d856f015fca763894e9e2a98',
     // PUBLISH-FIX-11 (2026-09-16): reconciler.hydrate reuses the replay's derived index entry for each target when the

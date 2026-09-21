@@ -60,11 +60,36 @@ Digest law: `sha256` over the sorted repository-relative file list, each entry a
 
 ```
 FROZEN_FOR_PAPER
-judge/*.js       5233617b47ae5de6fd91cd180bf3c8f7360645cbbdf406f430298d72220f1abb
+judge/*.js       6e7022571afde3e41a5f864ebc037f6ed175ce9ac9c73fc324cda6d39e80a3c8
 execution/*.js   bfcff6846d4dfd157eb84c2a5504298ba55244c09afeb746f33a1f5d1095a9a4
 watch/watch.js   6f319a1ee72a2b43346b8d07f906bb3ca31566ca7e3be0180d57f551d8a1afe1
-all (49 files)   e35b54c87b63c8384515ff54be10d775f05ae4a246b2d36bc8fc4bc361410e30
+all (49 files)   d393d661b0b62396ee5438abb7385df4175a274de196961af72f7e56419e4569
 ```
+
+### 4.39 Audited change — 2026-09-21 PUBLISH-FIX-102: a control that eats a sized bite says so; the deep tape adopts on the watch's clock (previous judge digest `5233617b47ae…`; now `6e7022571afd…`; all `e35b54c87b63…` → `d393d661b0b6…`; execution and watch/watch.js UNCHANGED; 49 files; `tape/run.js` re-pinned in `test/social-4f-scope.test.js`)
+
+Two silences and one race, all found by reading the snake's own records rather than the code.
+
+THE CONTROL. `CAGE` appears 28 times in the recorded episodes, between 2026-09-17T19:28:51Z and 2026-09-19T13:24:12Z, and it is
+the ONLY restriction that has ever fired: KILL 0, OVERLOAD 0, FEED_IMPAIRED 0, DAILY_LOSS 0, PEAK_DRAWDOWN 0,
+PAPER_LIQUIDITY_UNCERTAIN 0, RECONCILIATION_REQUIRED 0, WRITER_LOST 0, DB_UNAVAILABLE 0. Each of the 28 was a look that passed
+every gate AND found a size — the closest this account has ever come to an entry — refused by an owner control, recorded as one
+word in the ledger and never named on any line the owner reads. Nothing since 2026-09-19T13:24Z, so the cage is not a current
+blocker; it was one for about 42 hours and nobody was told. `judge/judge.js` now logs `RESTRICTION BLOCKED A BITE:` with the
+symbol, the setup, the size and price it had found, the risk, and every reason, ending "This is a CONTROL, not the market: it
+stays until the owner clears it"; the reasons are counted by name (`counters.restrictionRefusals` / `restrictionReasons`,
+bounded to 24) and `fly.js` prints them on the funnel line beside the close calls. The admission decision is byte-for-byte what
+it was — the look is still refused, with the same reasons, recorded the same way; `execution/authority.js` is untouched.
+
+THE RACE. `learning/volatility-watch.js` writes its picks every 30 s; `tape/run.js` adopted them into the deep tape every 60 s,
+while the Judge is nominated from the same picks — so a coin that had just started running could be offered to the Judge for up
+to a minute before anyone had subscribed to its order book, and was refused `FEED_NOT_IN_TAPE_UNIVERSE` (the top live refusal of
+the 2026-09-21 wall census). The interval is now 15 s. The pass is unchanged and still returns before any REST call or universe
+rewrite when there is no stale slot and no unseen nominee, and `hotLaneBusy` still makes a slow pass skip rather than queue, so
+four times the rate is not four times the cost. `tape/run.js` re-pinned `4e35ceac2bd0…` → `04e0adcecda4…`.
+
+Fenced by `test/publish-fix-102-nothing-silent.test.js` (5 tests, including that the control still refuses and the control layer
+is untouched). Authority unchanged: PAPER_SIMULATION_ONLY.
 
 ### 4.38 Audited change — 2026-09-21 PUBLISH-FIX-101: the second look has never armed once; two right-now flow gates were missing from its set (previous judge digest `96f83523029c…`; now `5233617b47ae…`; all `6016f931e155…` → `e35b54c87b63…`; execution and watch/watch.js UNCHANGED; 49 files)
 
