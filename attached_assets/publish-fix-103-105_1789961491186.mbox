@@ -1,0 +1,340 @@
+From 2135f48a600acfba7eda77271e937f45b4626854 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 21 Sep 2026 03:27:41 +0000
+Subject: [PATCH 1/3] PUBLISH-FIX-103: two drills that only passed on a laptop
+
+lib/config.js dataDir() is COBRA_DATA_DIR + SERPENT_DATA_GENERATION.
+Both drills set COBRA_DATA_DIR to their own temp root and left the
+generation to the ambient shell - and the Replit shell exports
+SERPENT_DATA_GENERATION=gen1. So the write went to <tmp>/gen1 and the
+read looked in <tmp>: green on a laptop, red on the deployment host.
+
+  test/universe.test.js      not ok 7 - a failed venue refresh withdraws
+                             new admission truth ...
+  test/tape-hot-lane.test.js not ok 3 - the current-universe record
+                             becomes a superset of the carried hot pairs
+
+Both now pin the generation off and restore it, so a drill owns its own
+data root whatever the shell says. Verified green BOTH ways:
+SERPENT_DATA_GENERATION=gen1 -> 9/9 and 4/4; unset -> 9/9 and 4/4.
+
+No source change. A "passes here, fails there" drill is how a real bug
+hides, and I had been unsetting the variable by hand to get a green
+line, which is the same thing as not running it.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01RoFoPS22WFW1oUnbWzPayd
+---
+ test/tape-hot-lane.test.js | 5 ++++-
+ test/universe.test.js      | 4 ++++
+ 2 files changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/test/tape-hot-lane.test.js b/test/tape-hot-lane.test.js
+index 7b949a6..37e06fc 100644
+--- a/test/tape-hot-lane.test.js
++++ b/test/tape-hot-lane.test.js
+@@ -40,6 +40,9 @@ test('the hot lane is bounded: a fourth nominee waits while every hot pair is in
+ 
+ test('the current-universe record becomes a superset of the carried hot pairs; only this session\'s nominations are read', async () => {
+   const dir = mkdtempSync(path.join(tmpdir(), 'serpent-hot-lane-')); const prev = process.env.COBRA_DATA_DIR; process.env.COBRA_DATA_DIR = dir;
++  // PUBLISH-FIX-103: pin the data GENERATION off too — dataDir() is COBRA_DATA_DIR + SERPENT_DATA_GENERATION, and the Replit
++  // shell exports gen1, which sent the write to <tmp>/gen1 while the read looked in <tmp>. A drill owns its own data root.
++  const prevGen = process.env.SERPENT_DATA_GENERATION; process.env.SERPENT_DATA_GENERATION = '';
+   try {
+     const { mergeCarriedIntoCurrentUniverse, readWideEyeNominationsToday, readCurrentUniverse, DEEP_UNIVERSE_SELECTION_VERSION } = await import('../tape/universe.js?hot-lane');
+     const { sessionDate } = await import('../lib/time.js');
+@@ -56,7 +59,7 @@ test('the current-universe record becomes a superset of the carried hot pairs; o
+     assert.deepEqual(readWideEyeNominationsToday(), [], 'a previous session\'s proposals are not hot today');
+     writeFileSync(path.join(dir, 'survey', 'nominations-current.json'), JSON.stringify({ date: sessionDate(), nominations: [{ coin: 'PUMP', ts: 'now' }] }));
+     assert.deepEqual(readWideEyeNominationsToday(), [{ coin: 'PUMP', ts: 'now' }]);
+-  } finally { if (prev === undefined) delete process.env.COBRA_DATA_DIR; else process.env.COBRA_DATA_DIR = prev; rmSync(dir, { recursive: true, force: true }); }
++  } finally { if (prev === undefined) delete process.env.COBRA_DATA_DIR; else process.env.COBRA_DATA_DIR = prev; if (prevGen === undefined) delete process.env.SERPENT_DATA_GENERATION; else process.env.SERPENT_DATA_GENERATION = prevGen; rmSync(dir, { recursive: true, force: true }); }
+ });
+ 
+ test('the Judge law already puts a newcomer first: a pair first seen now outranks every standing tenant and takes a slot at once (the oldest tenant is preempted)', () => {
+diff --git a/test/universe.test.js b/test/universe.test.js
+index ad5f19b..86a8b97 100644
+--- a/test/universe.test.js
++++ b/test/universe.test.js
+@@ -7,6 +7,10 @@ import path from 'node:path';
+ 
+ const TEST_DATA = mkdtempSync(path.join(tmpdir(), 'cobra-universe-'));
+ process.env.COBRA_DATA_DIR = TEST_DATA;
++// PUBLISH-FIX-103 (2026-09-21): a drill must be hermetic. lib/config.js dataDir() is COBRA_DATA_DIR + SERPENT_DATA_GENERATION,
++// and the Replit shell exports SERPENT_DATA_GENERATION=gen1 — so this drill wrote into <tmp>/gen1 and then looked in <tmp>,
++// failing on the deployment host and passing on a laptop. The generation is pinned OFF here: the drill owns its own data root.
++process.env.SERPENT_DATA_GENERATION = '';
+ 
+ const { selectFromRaw, selectUniverse, readCurrentUniverse, catalogUsdSymbols } = await import('../tape/universe.js');
+ const { classifyTape } = await import('../tape/health.js');
+-- 
+2.43.0
+
+
+From 41f5824572371b09e76dccd9c8dfcdc406a1afae Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 21 Sep 2026 03:30:27 +0000
+Subject: [PATCH 2/3] PUBLISH-FIX-104: a THIRD six, in a third file, clamping
+ the policy
+
+FIX-99 widened the tape's hot lane 6 -> 20 on measured headroom.
+FIX-100 widened policy.universe.preparationSlots and maxCandidates
+6 -> 20 and bound a NEW $500 account to do it, because a policy binding
+is immutable per account. Deployment dc6e5638 logged
+
+  HOT LANE: POL joins the deep tape now (... hot slots 20/20)
+
+and the very next funnel line read
+
+  JUDGE FUNNEL: 6 candidates; books 61413 ...
+
+judge/readiness.js carried `export const PREP_SLOTS_MAX = 6`, applied
+as Math.min(PREP_SLOTS_MAX, remainingSlots). It is a CEILING that had
+been set to exactly the number the policy used to say - so the policy
+could be widened, the account rebound, and twenty order books carried,
+and the Judge would still prepare six, silently, for ever.
+
+The policy is the authority: it is digest-bound to the account and
+cannot change without a new one. This constant only refuses an absurd
+value, so it is 64 now, not a second opinion about the number. Nothing
+else in selectPreparation moved - ranking, warm-up protection, the
+FIX-12 fair rotation, the TTL, held-asset exclusion and the loss
+reasons are byte-for-byte, and a policy asking for six still gets six.
+
+test/publish-fix-104-no-third-six.test.js walks the WHOLE chain -
+shipped config -> composition's Math.min(preparationSlots,
+maxCandidates) -> the slots actually selected - and asserts the
+narrowest point of the last stage is 20, so a fourth six in a fourth
+file cannot hide either.
+
+Frozen: judge 6e7022571afd -> 9122a83068c6, all d393d661b0b6 ->
+39a03bf6645e; execution and watch/watch.js unchanged. Recorded as
+docs/JUDGE-PAPER-AUDIT.md 4.40.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01RoFoPS22WFW1oUnbWzPayd
+---
+ docs/JUDGE-PAPER-AUDIT.md                 | 25 ++++++++-
+ judge/readiness.js                        |  8 ++-
+ test/judge-composition.test.js            |  4 +-
+ test/judge-preparation-rotation.test.js   |  7 ++-
+ test/publish-fix-104-no-third-six.test.js | 67 +++++++++++++++++++++++
+ 5 files changed, 106 insertions(+), 5 deletions(-)
+ create mode 100644 test/publish-fix-104-no-third-six.test.js
+
+diff --git a/docs/JUDGE-PAPER-AUDIT.md b/docs/JUDGE-PAPER-AUDIT.md
+index 9eb0f41..6ae10f6 100644
+--- a/docs/JUDGE-PAPER-AUDIT.md
++++ b/docs/JUDGE-PAPER-AUDIT.md
+@@ -60,12 +60,33 @@ Digest law: `sha256` over the sorted repository-relative file list, each entry a
+ 
+ ```
+ FROZEN_FOR_PAPER
+-judge/*.js       6e7022571afde3e41a5f864ebc037f6ed175ce9ac9c73fc324cda6d39e80a3c8
++judge/*.js       9122a83068c6f4b99d812a4c90647f6914285e2b9148a1e4f42dc68ccbbcb9ba
+ execution/*.js   bfcff6846d4dfd157eb84c2a5504298ba55244c09afeb746f33a1f5d1095a9a4
+ watch/watch.js   6f319a1ee72a2b43346b8d07f906bb3ca31566ca7e3be0180d57f551d8a1afe1
+-all (49 files)   d393d661b0b62396ee5438abb7385df4175a274de196961af72f7e56419e4569
++all (49 files)   39a03bf6645eea9b01cb0bd5a83baf31e941ef075431f1c19f51960f59363d66
+ ```
+ 
++### 4.40 Audited change — 2026-09-21 PUBLISH-FIX-104: a THIRD six was clamping the policy (previous judge digest `6e7022571afd…`; now `9122a83068c6…`; all `d393d661b0b6…` → `39a03bf6645e…`; execution and watch/watch.js UNCHANGED; 49 files)
++
++`judge/readiness.js` only, one constant. `PREP_SLOTS_MAX` was `6`, applied as `Math.min(PREP_SLOTS_MAX, remainingSlots)` in
++`selectPreparation`, so it is a CEILING set to exactly the number the policy used to carry. PUBLISH-FIX-99 widened the tape's hot
++lane 6 → 20 on measured headroom; PUBLISH-FIX-100 widened `policy.universe.preparationSlots` and `maxCandidates` 6 → 20 and bound
++a NEW $500 account to do it, because a policy binding is immutable per account. Deployment `dc6e5638` logged `HOT LANE: POL joins
++the deep tape now (… hot slots 20/20)` — and the next funnel line read `JUDGE FUNNEL: 6 candidates`. The policy could be widened,
++the account rebound and twenty order books carried, and the Judge would still have prepared six, silently, for ever.
++
++The policy is the authority for how many coins stand on the stage: it is digest-bound to the account (`ACCOUNT_POLICY_MISMATCH`
++on any byte) and cannot change without a new account, which is the strongest guarantee in this system. This constant exists only
++to refuse an absurd value, so it is now `64` — a real ceiling well above any policy we would write — and not a second opinion
++about the number. Nothing else in `selectPreparation` moved: the ranking law, the warm-up protection, the fair rotation of
++PUBLISH-FIX-12, the nomination TTL, held-asset exclusion and the `PREEMPTED_BY_NEWER_NOMINATION` / `NOMINATION_EXPIRED` reasons
++are byte-for-byte what they were, and a policy asking for six still gets six.
++
++Fenced by `test/publish-fix-104-no-third-six.test.js` (5 tests) which walks the WHOLE chain — shipped config → the composition's
++`Math.min(preparationSlots, maxCandidates)` → the slots actually selected — and asserts the narrowest point of the funnel's last
++stage is 20, so a fourth six in a fourth file cannot hide either. `test/judge-composition.test.js` J11 and
++`test/judge-preparation-rotation.test.js` updated with the reason. Authority unchanged: PAPER_SIMULATION_ONLY.
++
+ ### 4.39 Audited change — 2026-09-21 PUBLISH-FIX-102: a control that eats a sized bite says so; the deep tape adopts on the watch's clock (previous judge digest `5233617b47ae…`; now `6e7022571afd…`; all `e35b54c87b63…` → `d393d661b0b6…`; execution and watch/watch.js UNCHANGED; 49 files; `tape/run.js` re-pinned in `test/social-4f-scope.test.js`)
+ 
+ Two silences and one race, all found by reading the snake's own records rather than the code.
+diff --git a/judge/readiness.js b/judge/readiness.js
+index 1b2a3b1..9b9cb48 100644
+--- a/judge/readiness.js
++++ b/judge/readiness.js
+@@ -13,7 +13,13 @@ import { SETUPS } from './setups.js';
+ 
+ export const READINESS_VERSION = 'judge-readiness-1';
+ export const READINESS_STATES = Object.freeze(['HISTORY_WARMING', 'FLOW_WARMING', 'CASE_REQUIRED', 'READY_TO_EVALUATE', 'BLOCKED']);
+-export const PREP_SLOTS_MAX = 6;
++// PUBLISH-FIX-104 (2026-09-21): this was 6, and it is a CEILING — `Math.min(PREP_SLOTS_MAX, remainingSlots)` below — so it
++// silently clamped the policy. PUBLISH-FIX-100 widened `policy.universe.preparationSlots` and `maxCandidates` 6 -> 20 and bound
++// a new account for it, the tape carried `hot slots 20/20`, and the very next funnel line still read `JUDGE FUNNEL: 6 candidates`.
++// A third six, in a different file, undoing the first two without a word. The POLICY is the authority for how many coins stand
++// on the stage (it is digest-bound to the account and cannot change without a new one); this constant exists only to refuse an
++// absurd value, so it is now a real ceiling well above any policy we would write, not a second opinion about the number.
++export const PREP_SLOTS_MAX = 64;
+ // PUBLISH-FIX-12 (2026-09-17, review F2): FAIR ROTATION. Standing nominations are stamped once, so with more nominations
+ // than slots the same six assets held the slots forever — the independent review's witness: 30 stable nominations, 100
+ // refreshes, the same six every time, 24 never prepared. A prepared candidate now holds its slot for a TENURE (long enough
+diff --git a/test/judge-composition.test.js b/test/judge-composition.test.js
+index fe78af0..a0b0b20 100644
+--- a/test/judge-composition.test.js
++++ b/test/judge-composition.test.js
+@@ -54,7 +54,9 @@ test('J01/J11-history. the 1m bar history: a cold start through the public OHLC
+ test('J11. preparation slots and readiness records: at most six warm candidates, newest nomination first, held assets never contest, expired nominations drop, a lost slot names PREEMPTED_BY_NEWER_NOMINATION or NOMINATION_EXPIRED with its prepared duration; readiness names each missing interval (BARS_61 with have / need, FLOW_21MIN with the earliest ready clock, BOOK_FRESH, BASELINE_BOOKS_30, CATALYST_CASE) and a veto / halted instrument is BLOCKED; readiness is never permission', () => {
+   const now = T0; const nom = (assetId, ageMs, source = 'UNIVERSE') => ({ symbol: `${assetId}/USD`, assetId, source, nominationKnownAtTs: now - ageMs });
+   const noms = [nom('BTC', 5000), nom('ETH', 4000), nom('SOL', 3000), nom('ADA', 2000), nom('DOT', 1000), nom('LTC', 900), nom('XRP', 800), nom('AVAX', 700), nom('OLD', 3_600_001), nom('HELD', 100)];
+-  const s1 = selectPreparation({ nominations: noms, held: new Set(['HELD']), remainingSlots: 99, nowTs: now }); assert.equal(s1.slots, PREP_SLOTS_MAX); assert.deepEqual(s1.selected.map((n) => n.assetId), ['AVAX', 'XRP', 'LTC', 'DOT', 'ADA', 'SOL']); assert.deepEqual(s1.preempted.map((p) => p.assetId), ['ETH', 'BTC']); assert.ok(!s1.selected.some((n) => n.assetId === 'OLD' || n.assetId === 'HELD')); assert.deepEqual(s1.held, ['HELD']);
++  // PUBLISH-FIX-104: the ceiling is 64, not 6 — a policy asking for six still gets six, and the ORDERING law below is what this
++  // drill is about. (PUBLISH-FIX-100 widened the shipped policy to 20; PREP_SLOTS_MAX had been silently clamping it back to 6.)
++  const s1 = selectPreparation({ nominations: noms, held: new Set(['HELD']), remainingSlots: 6, nowTs: now }); assert.equal(s1.slots, 6); assert.equal(PREP_SLOTS_MAX, 64); assert.deepEqual(s1.selected.map((n) => n.assetId), ['AVAX', 'XRP', 'LTC', 'DOT', 'ADA', 'SOL']); assert.deepEqual(s1.preempted.map((p) => p.assetId), ['ETH', 'BTC']); assert.ok(!s1.selected.some((n) => n.assetId === 'OLD' || n.assetId === 'HELD')); assert.deepEqual(s1.held, ['HELD']);
+   const previous = new Map(s1.selected.map((n) => [n.assetId, { ...n, preparedSinceTs: now - 30_000 }])); const later = now + 10_000; const s2 = selectPreparation({ nominations: [...noms.filter((n) => n.assetId !== 'SOL'), nom('NEW', 0)].map((n) => ({ ...n, nominationKnownAtTs: n.assetId === 'NEW' ? later : n.nominationKnownAtTs })), held: new Set(['HELD']), remainingSlots: 6, previous, nowTs: later });
+   assert.deepEqual(s2.selected.map((n) => n.assetId), ['NEW', 'AVAX', 'XRP', 'LTC', 'DOT', 'ADA']); assert.equal(s2.selected[1].preparedSinceTs, now - 30_000, 'a kept candidate keeps its preparation clock'); assert.deepEqual(s2.lost, [{ assetId: 'SOL', reason: 'NOMINATION_EXPIRED', preparedMs: 40_000 }]);
+   const bars = Array.from({ length: 60 }, (_, i) => ({ periodStartTs: now - (61 - i) * 60_000, periodEndTs: now - (60 - i) * 60_000, open: 1, high: 1, low: 1, close: 1, volumeQuote: 1, volumeBase: 1, closed: true }));
+diff --git a/test/judge-preparation-rotation.test.js b/test/judge-preparation-rotation.test.js
+index bafc224..63f63ab 100644
+--- a/test/judge-preparation-rotation.test.js
++++ b/test/judge-preparation-rotation.test.js
+@@ -61,5 +61,10 @@ test('F2: a rotated-out tenant does not bounce back on the next pass, and held a
+   // held assets are outside the contest entirely
+   const heldSel = selectPreparation({ nominations: list, held: new Set(['C01', 'C02']), remainingSlots: 6, nowTs: now });
+   assert.ok(!heldSel.selected.some((n) => ['C01', 'C02'].includes(n.assetId))); assert.deepEqual(heldSel.held, ['C01', 'C02']);
+-  assert.equal(PREP_SLOTS_MAX, 6);
++  // PUBLISH-FIX-104 (2026-09-21): this was 6 and it silently CLAMPED the policy — PUBLISH-FIX-100 widened
++  // policy.universe.preparationSlots 6 -> 20 (and bound a new account for it), the tape carried hot slots 20/20, and the next
++  // funnel line still read `6 candidates`. The policy is the authority; this constant only refuses an absurd value.
++  assert.equal(PREP_SLOTS_MAX, 64);
++  assert.equal(selectPreparation({ nominations: list, remainingSlots: 20, nowTs: now }).slots, 20, 'a policy asking for twenty gets twenty');
++  assert.equal(selectPreparation({ nominations: list, remainingSlots: 999, nowTs: now }).slots, 64, 'and an absurd value is still refused at the ceiling');
+ });
+diff --git a/test/publish-fix-104-no-third-six.test.js b/test/publish-fix-104-no-third-six.test.js
+new file mode 100644
+index 0000000..0812ad5
+--- /dev/null
++++ b/test/publish-fix-104-no-third-six.test.js
+@@ -0,0 +1,67 @@
++// PUBLISH-FIX-104 (2026-09-21). A THIRD SIX, in a third file, undoing the first two without a word.
++//
++// PUBLISH-FIX-99 widened the tape's hot lane 6 -> 20 on measured headroom. PUBLISH-FIX-100 widened
++// policy.universe.preparationSlots and maxCandidates 6 -> 20 and bound a NEW $500 account to do it, because a policy binding is
++// immutable per account. Deployment dc6e5638 then logged `HOT LANE: POL joins the deep tape now (... hot slots 20/20)` — and the
++// very next funnel line read:
++//
++//     JUDGE FUNNEL: 6 candidates; books 61413 ...
++//
++// judge/readiness.js carried `export const PREP_SLOTS_MAX = 6`, applied as `Math.min(PREP_SLOTS_MAX, remainingSlots)`. It is a
++// CEILING, and it was set to exactly the number the policy used to say — so the policy could be widened, the account could be
++// rebound, the tape could carry twenty books, and the Judge would still prepare six, silently, for ever.
++//
++// The policy is the authority for how many coins stand on the stage: it is digest-bound to the account and cannot change without
++// a new one, which is the strongest guarantee in the system. This constant exists only to refuse an absurd value. This drill
++// walks the WHOLE chain — shipped config -> composition's remainingSlots -> the slots actually selected — so a fourth six in a
++// fourth file cannot hide either.
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import { readFileSync } from 'node:fs';
++import { selectPreparation, PREP_SLOTS_MAX } from '../judge/readiness.js';
++import { loadJudgePolicy } from '../judge/policy.js';
++
++const POLICY_FILE = 'config/judge.paper.starting-styles-fee080.json';
++const now = Date.UTC(2026, 8, 21, 3, 0, 0);
++const noms = (n) => Array.from({ length: n }, (_, i) => ({
++  symbol: `C${String(i).padStart(2, '0')}/USD`, assetId: `C${String(i).padStart(2, '0')}`, source: 'VOLATILITY_WATCH',
++  nominationKnownAtTs: now - (n - i) * 1000, nominationLastSeenTs: now - (n - i) * 1000,
++}));
++
++test('FIX104-1: the ceiling is no longer the policy\'s old number', () => {
++  assert.equal(PREP_SLOTS_MAX, 64);
++  assert.notEqual(PREP_SLOTS_MAX, 6, 'a ceiling equal to the value it bounds is not a ceiling, it is a second opinion');
++});
++
++test('FIX104-2: the SHIPPED policy asks for twenty, and twenty is what is prepared', () => {
++  const { policy } = loadJudgePolicy(POLICY_FILE);
++  const remaining = Math.min(policy.universe.preparationSlots, policy.universe.maxCandidates); // judge/composition.js admitNominations
++  assert.equal(remaining, 20, 'the effective ask (PUBLISH-FIX-100)');
++  const sel = selectPreparation({ nominations: noms(40), remainingSlots: remaining, nowTs: now });
++  assert.equal(sel.slots, 20, 'and the planner grants it — before FIX-104 this was 6');
++  assert.equal(sel.selected.length, 20);
++  assert.equal(sel.preempted.length, 20, 'the other twenty wait, they are not lost');
++});
++
++test('FIX104-3: the ceiling still refuses an absurd value', () => {
++  assert.equal(selectPreparation({ nominations: noms(200), remainingSlots: 1000, nowTs: now }).slots, 64);
++  assert.equal(selectPreparation({ nominations: noms(10), remainingSlots: 0, nowTs: now }).slots, 0);
++  assert.equal(selectPreparation({ nominations: noms(10), remainingSlots: -5, nowTs: now }).slots, 0, 'never negative');
++});
++
++test('FIX104-4: a smaller policy is still honoured — the ceiling never RAISES the number', () => {
++  const sel = selectPreparation({ nominations: noms(40), remainingSlots: 6, nowTs: now });
++  assert.equal(sel.slots, 6); assert.equal(sel.selected.length, 6);
++});
++
++test('FIX104-5: the whole stage agrees — tape, feed and Judge all say twenty', () => {
++  const { policy } = loadJudgePolicy(POLICY_FILE);
++  const cobra = JSON.parse(readFileSync('cobra.config.json', 'utf8'));
++  assert.equal(cobra.universeExpansion.hotLane.slots, 20, 'the tape carries twenty order books (PUBLISH-FIX-99)');
++  assert.equal(policy.universe.preparationSlots, 20, 'the Judge prepares twenty (PUBLISH-FIX-100)');
++  assert.equal(policy.universe.maxCandidates, 20, 'the execution feed admits twenty (PUBLISH-FIX-100)');
++  assert.ok(PREP_SLOTS_MAX >= 20, 'and nothing clamps it on the way (PUBLISH-FIX-104)');
++  // the funnel can only ever show as many candidates as the SMALLEST of these
++  const effective = Math.min(cobra.universeExpansion.hotLane.slots, policy.universe.preparationSlots, policy.universe.maxCandidates, PREP_SLOTS_MAX);
++  assert.equal(effective, 20, `the narrowest point of the funnel's last stage is ${effective}, not 20`);
++});
+-- 
+2.43.0
+
+
+From cd6a974e0ce38f94cd55ae81c635cd143f59f2f5 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 21 Sep 2026 03:31:21 +0000
+Subject: [PATCH 3/3] PUBLISH-FIX-105: the instrument that answers "why" runs
+ one minute in ten
+
+One sampled top-frames minute in THIRTY meant that when the loop was
+saturated - 87% tonight at twenty order books - the only line that says
+what the main thread was doing arrived once every half hour, and the
+first one after a boot described the boot, not the running app.
+
+At one in ten the instrument costs about 0.4% of the thread on average
+and the app can always answer the question that found tonight's real
+hog:
+
+  CPU PROFILE 60s: top: fsync 40% 4793ms . update 16% . (gc) 6%
+                   . readFileUtf8 4% . writeBuffer 4% . open 2%
+
+The every-minute CPU LOAD line (event-loop utilization, no profiler at
+all) is unchanged. Diagnostic only; authority NONE.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01RoFoPS22WFW1oUnbWzPayd
+---
+ lib/cpu-profile-report.js | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/lib/cpu-profile-report.js b/lib/cpu-profile-report.js
+index 6af0b29..b15108d 100644
+--- a/lib/cpu-profile-report.js
++++ b/lib/cpu-profile-report.js
+@@ -17,7 +17,13 @@ import path from 'node:path';
+ 
+ export const CPU_PROFILE_INTERVAL_MS = 60_000;
+ export const CPU_PROFILE_TOP = 10;
+-export const CPU_PROFILE_EVERY = 30; // PUBLISH-FIX-83 item 30 (was 5): one sampled minute in thirty — the profile's own serialization ran on the thread it measures; the every-minute CPU LOAD line (event-loop utilization, no profiler) is unchanged
++// PUBLISH-FIX-83 item 30 took this from 5 to 30: the profile's own serialization runs on the thread it measures. PUBLISH-FIX-105
++// (2026-09-21) brings it to 10. One sampled minute in thirty means that when the loop is saturated — as it was tonight at 87% —
++// the only line that says WHY arrives once every half hour, and the first one after a boot describes the boot rather than the
++// running app. At one in ten the instrument costs about 0.4% of the thread on average and the app can always answer "what was
++// the main thread doing", which is the question that found the fsync. The every-minute CPU LOAD line (event-loop utilization,
++// no profiler at all) is unchanged.
++export const CPU_PROFILE_EVERY = 10;
+ 
+ const post = (session, method, params = {}) => new Promise((resolve, reject) => session.post(method, params, (err, res) => (err ? reject(err) : resolve(res))));
+ 
+-- 
+2.43.0
+
