@@ -57,13 +57,30 @@ export function createExecutionFeed({ clock = () => Date.now(), limits = FEED_DE
   const sourceClockOf = (msg) => { const d = Array.isArray(msg?.data) ? msg.data : null; if (!d || !d.length) return null; let best = null; for (const row of d) { const t = typeof row?.timestamp === 'string' ? Date.parse(row.timestamp) : NaN; if (Number.isFinite(t) && (best === null || t > best)) best = t; } return best; };
   const emit = (ev) => { for (const fn of listeners) { try { fn(ev); } catch (err) { counters.listenerErrors += 1; if (counters.listenerErrors <= 3) log(`execution feed listener error (ignored): ${err?.message ?? err}`); } } };
   const bookOf = (symbol) => { if (!books.has(symbol)) { const p = precisions.get(symbol) ?? null; books.set(symbol, { bids: new Map(), asks: new Map(), synced: false, lastReceiptTs: null, lastSourceTs: null, receiptSequence: 0, priceDecimals: p ? p.priceDecimals : null, qtyDecimals: p ? p.qtyDecimals : null, crcFailures: 0, lastSnapshot: null, epoch }); } return books.get(symbol); };
-  const sortedLevels = (map, side) => [...map.entries()].sort((a, b) => (side === 'bids' ? M.cmp(b[0], a[0]) : M.cmp(a[0], b[0])));
+  // PUBLISH-FIX-114 (2026-09-21): the book was sorted FOUR to SIX times per update (truncate, checksum, snapshot — each side), every
+  // sort calling M.cmp per comparison (two regex tests and two Number() conversions, or the exact BigInt path). Production 44e7e36b,
+  // the sampled minute at 98% busy with twenty candidates: `sortedLevels feed.js:60 19%` — the top frame of the main thread. Now a
+  // side is sorted ONCE per applied message, with the double of each price computed once per level as a sort key (correct rounding
+  // is monotonic, so different doubles are ordered exactly as the decimals; equal doubles fall to the exact comparator, the same
+  // law as money.js cmp and features.js medianDecimal / minDecimal); a price that fails the fast-path guard sends the whole side
+  // down the exact comparator. Same order, byte for byte; truncation, checksum and snapshot share the one sorted array.
+  const LEVEL_FAST_RE = /^(0|[1-9]\d*)(\.\d+)?$/; const LEVEL_FAST_MAX_LEN = 20;
+  const sortedLevels = (map, side) => {
+    const entries = [...map.entries()]; const n = entries.length; const sign = side === 'bids' ? -1 : 1;
+    const keys = new Float64Array(n);
+    for (let i = 0; i < n; i += 1) { const p = entries[i][0]; if (typeof p !== 'string' || p.length > LEVEL_FAST_MAX_LEN || !LEVEL_FAST_RE.test(p)) return entries.sort((a, b) => sign * M.cmp(a[0], b[0])); keys[i] = Number(p); }
+    const idx = new Array(n); for (let i = 0; i < n; i += 1) idx[i] = i;
+    idx.sort((i, j) => { const x = keys[i]; const y = keys[j]; if (x !== y) return x < y ? -sign : sign; return sign * M.cmp(entries[i][0], entries[j][0]); });
+    const out = new Array(n); for (let i = 0; i < n; i += 1) out[i] = entries[idx[i]]; return out;
+  };
+  // one sort per side per applied message: the levels beyond the subscribed depth leave the map, and the sorted (already truncated)
+  // arrays are handed to the checksum and the snapshot instead of being sorted again
+  function sortAndTruncate(b, symbol) { const depth = depthFor(symbol); const out = { bids: null, asks: null }; for (const side of ['bids', 'asks']) { const m = b[side]; const s = sortedLevels(m, side); if (s.length > depth) { for (let i = depth; i < s.length; i += 1) m.delete(s[i][0]); s.length = depth; } out[side] = s; } return out; }
   // the exact subscribed depth: the bound tape's depthOf (the subscription it actually holds) wins, then the admission's depth, then the constructor's
   const depthFor = (symbol) => { const t = tape && typeof tape.depthOf === 'function' ? tape.depthOf(symbol) : null; const a = admitted.get(symbol)?.depth ?? null; const d = t ?? a ?? depthOf(symbol) ?? L.maxLevels; return Number.isSafeInteger(d) && d > 0 ? Math.min(d, L.maxLevels) : L.maxLevels; };
-  function truncate(b, symbol) { const depth = depthFor(symbol); for (const side of ['bids', 'asks']) { const m = b[side]; if (m.size > depth) for (const [p] of sortedLevels(m, side).slice(depth)) m.delete(p); } }
-  function checksum(b) { if (b.priceDecimals === null || b.qtyDecimals === null) return { computed: null, reason: 'PRECISION_UNKNOWN' }; let s = ''; for (const side of ['asks', 'bids']) for (const [p, q] of sortedLevels(b[side], side).slice(0, 10)) { const pd = crcDigits(p, b.priceDecimals); const qd = crcDigits(q, b.qtyDecimals); if (pd === null || qd === null) return { computed: null, reason: 'PRECISION_UNSUPPORTED' }; s += pd + qd; } return { computed: crc32(s), reason: null }; }
-  function snapshotOf(symbol, b, { kind, sourceTs, receiptTs, crc, crcVerified, crcComputed }) {
-    const bids = sortedLevels(b.bids, 'bids'); const asks = sortedLevels(b.asks, 'asks'); const cap = depthFor(symbol);
+  function checksum(b, sorted) { if (b.priceDecimals === null || b.qtyDecimals === null) return { computed: null, reason: 'PRECISION_UNKNOWN' }; let s = ''; for (const side of ['asks', 'bids']) for (const [p, q] of sorted[side].slice(0, 10)) { const pd = crcDigits(p, b.priceDecimals); const qd = crcDigits(q, b.qtyDecimals); if (pd === null || qd === null) return { computed: null, reason: 'PRECISION_UNSUPPORTED' }; s += pd + qd; } return { computed: crc32(s), reason: null }; }
+  function snapshotOf(symbol, b, { kind, sourceTs, receiptTs, crc, crcVerified, crcComputed }, sorted) {
+    const bids = sorted.bids; const asks = sorted.asks; const cap = depthFor(symbol); // PUBLISH-FIX-114: the one sorted, truncated array per side
     const s = { snapshotVersion: 'execution-book-snapshot-1', symbol, canonicalCoin: coinOf(symbol), feedEpoch: epoch, receiptSequence: b.receiptSequence, nativeSequence: null, sourceTs, receiptTs, crc, crcVerified, crcComputed, synced: b.synced, instrumentDigest: admitted.get(symbol)?.specDigest ?? null, priceDecimals: b.priceDecimals, qtyDecimals: b.qtyDecimals, bids: bids.slice(0, cap).map(([p, q]) => Object.freeze([canon(p), canon(q)])), asks: asks.slice(0, cap).map(([p, q]) => Object.freeze([canon(p), canon(q)])), levelsCap: cap, truncated: bids.length > cap || asks.length > cap, kind, digest: 'x'.repeat(64) };
     s.digest = digestOf({ ...s, digest: null }); Object.freeze(s.bids); Object.freeze(s.asks); return Object.freeze(s); // deeply immutable: no subscriber can alter a level under the digest (closeout R09)
   }
@@ -86,12 +103,13 @@ export function createExecutionFeed({ clock = () => Date.now(), limits = FEED_DE
   function applyBook(symbol, d, type, receiptTs) {
     const b = bookOf(symbol); b.receiptSequence = ++receiptSequence; const sourceTs = typeof d.timestamp === 'string' ? Date.parse(d.timestamp) || null : null;
     let changes = null;
-    if (type === 'snapshot') { b.bids.clear(); b.asks.clear(); b.epoch = epoch; for (const l of d.bids ?? []) b.bids.set(l.price, l.qty); for (const l of d.asks ?? []) b.asks.set(l.price, l.qty); b.synced = true; bookRequests.delete(symbol); truncate(b, symbol); }
-    else { if (!b.synced) { counters.ignored += 1; requestBookSnapshot(symbol, 'UPDATE_WITHOUT_SNAPSHOT', receiptTs); return; } changes = []; for (const side of ['bids', 'asks']) for (const l of d[side] ?? []) { const q = canon(l.qty); changes.push([side, canon(l.price), q]); if (M.isZero(q)) b[side].delete(l.price); else b[side].set(l.price, l.qty); } truncate(b, symbol); }
-    const crc = d.checksum === undefined ? null : Number(d.checksum); const { computed, reason } = checksum(b); if (reason === 'PRECISION_UNSUPPORTED') counters.precisionUnsupported += 1;
+    if (type === 'snapshot') { b.bids.clear(); b.asks.clear(); b.epoch = epoch; for (const l of d.bids ?? []) b.bids.set(l.price, l.qty); for (const l of d.asks ?? []) b.asks.set(l.price, l.qty); b.synced = true; bookRequests.delete(symbol); }
+    else { if (!b.synced) { counters.ignored += 1; requestBookSnapshot(symbol, 'UPDATE_WITHOUT_SNAPSHOT', receiptTs); return; } changes = []; for (const side of ['bids', 'asks']) for (const l of d[side] ?? []) { const q = canon(l.qty); changes.push([side, canon(l.price), q]); if (M.isZero(q)) b[side].delete(l.price); else b[side].set(l.price, l.qty); } }
+    const sorted = sortAndTruncate(b, symbol); // PUBLISH-FIX-114: one sort per side, shared by truncation, checksum and snapshot
+    const crc = d.checksum === undefined ? null : Number(d.checksum); const { computed, reason } = checksum(b, sorted); if (reason === 'PRECISION_UNSUPPORTED') counters.precisionUnsupported += 1;
     let crcVerified = null; if (crc !== null && computed !== null) { crcVerified = computed === crc; if (!crcVerified) { b.crcFailures += 1; counters.crcFailures += 1; b.synced = false; b.bids.clear(); b.asks.clear(); emit({ kind: 'HEALTH', symbol, state: 'DESYNCHRONIZED', reason: 'CRC_MISMATCH', receiptTs, epoch }); return; } }
     b.lastReceiptTs = receiptTs; b.lastSourceTs = sourceTs; counters.books += 1;
-    const snap = snapshotOf(symbol, b, { kind: type === 'snapshot' ? 'SNAPSHOT' : 'UPDATE', sourceTs, receiptTs, crc, crcVerified, crcComputed: computed }); b.lastSnapshot = snap; emit({ kind: 'BOOK', symbol, snapshot: snap, changes: changes ? Object.freeze(changes) : null });
+    const snap = snapshotOf(symbol, b, { kind: type === 'snapshot' ? 'SNAPSHOT' : 'UPDATE', sourceTs, receiptTs, crc, crcVerified, crcComputed: computed }, sorted); b.lastSnapshot = snap; emit({ kind: 'BOOK', symbol, snapshot: snap, changes: changes ? Object.freeze(changes) : null });
   }
   function applyTrade(symbol, t, type, receiptTs) {
     const ring = tradeRings.get(symbol) ?? (tradeRings.set(symbol, { set: new Set(), order: [] }), tradeRings.get(symbol)); const id = t.trade_id === undefined || t.trade_id === null ? null : String(t.trade_id);

@@ -61,10 +61,28 @@ Digest law: `sha256` over the sorted repository-relative file list, each entry a
 ```
 FROZEN_FOR_PAPER
 judge/*.js       9453d3f2016629a2a19d0ebac6c951f3a39889554b9f7ddc3e0012ce4a3cd686
-execution/*.js   f6421a32ef67c47a986541bed21aa3a6d5c3cce5e31dde3f7f7973a2788de025
+execution/*.js   019f8fefbace35dbfeafad17b14fac47305046434315dee07edf48e0ea5d9802
 watch/watch.js   6f319a1ee72a2b43346b8d07f906bb3ca31566ca7e3be0180d57f551d8a1afe1
-all (49 files)   57e646b7dfb774454cbb216f901cf59203dcb98cabfa0a23d5a7bf792dbe6b59
+all (49 files)   ef57c5ce0af99957244e1639dfe576e51eec50535a9b847717f1b86c4da1ceed
 ```
+
+### 4.45 Audited change — 2026-09-21 PUBLISH-FIX-114: one sort per book side per applied message (previous execution digest `f6421a32ef67…`; now `019f8fefbace…`; all `57e646b7dfb7…` → `ef57c5ce0af9…`; judge and watch/watch.js UNCHANGED; 49 files)
+
+`execution/feed.js` only. Production `44e7e36b` (PUBLISH-FIX-110..113 live), the sampled minute at 98% busy with twenty
+candidates: `sortedLevels feed.js:60 19%` — the top frame of the main thread, ahead of `canonicalJson 10%`. Every applied
+book message sorted each side of the book with `M.cmp` per comparison FOUR to SIX times: `truncate` (when over the
+subscribed depth), `checksum` (both sides) and `snapshotOf` (both sides). Now `sortAndTruncate` sorts each side ONCE, the
+levels beyond the subscribed depth leave the map from that one sorted array, and the same (already truncated) arrays are
+handed to the checksum and the snapshot. Inside the sort the double of each price is computed once per level as the sort
+key — correct rounding is monotonic, so different doubles are ordered exactly as the decimals — and equal doubles fall to
+the exact comparator; a price that fails the fast-path guard (not a plain decimal, or over twenty characters) sends the
+whole side down `M.cmp` as before. This is the law `money.js cmp` and `features.js medianDecimal / minDecimal` already
+use. Same order, same CRC, same snapshot digest, byte for byte: `test/publish-fix-114-one-sort-per-book.test.js` (5) drives
+a real feed through a snapshot and two hundred random updates with deletes and re-inserts and checks every snapshot's
+order, CRC verification and contract against the exact comparator alone; holds the depth; proves the tie and long-lexeme
+paths; and pins the one call site. `book-snapshot-order-review`, `judge-feed-clock`, `publish-fix-83-execution`,
+`publish-fix-84-silent-feed`, the differential replay and the paper spine are green. Authority unchanged:
+PAPER_SIMULATION_ONLY.
 
 ### 4.44 Audited change — 2026-09-21 PUBLISH-FIX-113: `fromNumberLexeme` memoised (previous execution digest `bfcff6846d4d…`; now `f6421a32ef67…`; all `9af8b8db1c86…` → `57e646b7dfb7…`; judge and watch/watch.js UNCHANGED; 49 files)
 
