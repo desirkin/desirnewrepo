@@ -124,7 +124,12 @@ export function maturationSweep({ episodes, latestOutcomes, archive, asOfTs, att
     }
     let attach = matureEpisode({ episode: e, archive, asOfTs, attachedTs, costAssumptions, supersedes: existing ? existing.attachedTs : null });
     if (attach === null) { if (pastDeadline && existing) { attach = settleAtDeadline(existing); } else if (pastDeadline) { pending += 1; continue; } else { pending += 1; continue; } }
-    if (attach.outcomeRow.availability.state === 'UNAVAILABLE') { unavailable += 1; if (existing && pastDeadline && existing.outcomeRow.availability.state !== 'UNAVAILABLE') { attachments.push(settleAtDeadline(existing)); settledAtDeadline += 1; continue; } /* review finding: a SHORT-stage row whose data then left the window settles, instead of being re-labelled every sweep */ if (existing) continue; attachments.push(attach); continue; }
+    if (attach.outcomeRow.availability.state === 'UNAVAILABLE') { unavailable += 1; if (existing && pastDeadline && existing.outcomeRow.availability.state !== 'UNAVAILABLE') {
+        // PUBLISH-FIX-92 (2026-09-21, production stall): this settle row was pushed as a copy of the EXISTING row — same attachedTs, same
+        // supersedes — so the store's duplicate check (same opportunityId + attachedTs) silently dropped it every tick, the episode never
+        // left the pending set, and the oldest 200 such episodes ate the whole sweep budget forever (status: matured 0, pending 0,
+        // unavailable 200; 6,941 judge looks in 48 h with no outcome row). A settlement is a NEW attachment: this sweep's clock, superseding the row it settles.
+        attachments.push(deepFreeze({ ...settleAtDeadline(existing), attachedTs, supersedes: existing.attachedTs })); settledAtDeadline += 1; continue; } /* review finding: a SHORT-stage row whose data then left the window settles, instead of being re-labelled every sweep */ if (existing) continue; attachments.push(attach); continue; }
     if (pastDeadline && outcomeStage(attach.outcomeRow) < 2) { attach = settleAtDeadline(attach); settledAtDeadline += 1; }
     const stageNow = outcomeStage(attach.outcomeRow); const stageBefore = existing ? outcomeStage(existing.outcomeRow) : -1;
     if (stageNow === 0) { pending += 1; continue; } // the bite and the continuation are not both in yet: no row that says half a thing

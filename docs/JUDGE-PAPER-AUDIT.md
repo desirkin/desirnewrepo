@@ -266,6 +266,16 @@ nothing (heavy selling +0.06% at 15 minutes, strong buying +0.07%). A line someb
   the broad-Kraken reader's boot window (3 newest segments, ~43 min) could not hold 60 minutes after a restart. The process now
   reads ONE broad-Kraken series (BROAD_SERIES_SEGMENTS = 12, ~2.8 h) shared by the mover seed, the volatility watch, the live
   archive and the decision-outcome recorder. Tests: publish-fix-86-live-counterfactual.
+- `learning/maturation.js` / `learning/service.js` (PUBLISH-FIX-92, 2026-09-21; not frozen): the maturation sweep was stalled.
+  Artifact: learning/status.json at 2026-09-20 23:53 UTC read maturation {matured 0, pending 0, unavailable 200} every tick with
+  errors 0; outcomes.jsonl held 131,980 attach rows over 14,731 opportunities, 4–12 new rows an hour since 2026-09-20 04:00
+  (all mover-study), and 6,941 judge looks in 48 h had no outcome row — so FIX-86's counterfactual, wired correctly, had
+  produced nothing for the judge. Cause: an episode with a SHORT-stage row whose data then left the live window was "settled"
+  at its deadline by pushing a copy of the EXISTING row (same attachedTs, same supersedes); the store's duplicate check
+  dropped it silently, the episode never left the pending set, and the oldest 200 such episodes consumed the whole budget on
+  every sweep. A settlement is now a NEW attachment (this sweep's clock, superseding the row it settles); the tick report
+  names settledAtDeadline / skippedRecent / written so a stalled sweep is visible in status. Tests: publish-fix-92-settle-supersedes
+  (fails on the previous code).
 - `tools/gate-study-process.js` / `tools/gate-study-child.js`: the join runs in a child process every 30 minutes (90 s
   after boot first); the main thread never reads the ledger; the lesson lands in `data/learning/gate-lessons/lesson.json`
   (+ `state.json` with the proposal history). `fly.js` composes the reader as the Judge's port.

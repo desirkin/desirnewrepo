@@ -127,7 +127,7 @@ export function startLearning({
     const latest = store.latestOutcomes();
     const sweep = maturationSweep({ episodes, latestOutcomes: latest, archive, asOfTs: nowTs, attachedTs: nowTs, maxPerSweep: MAX_MATURATION_PER_TICK, costAssumptions });
     for (const attach of sweep.attachments) { try { store.appendOutcome(attach); if (attach.outcomeRow.availability.state !== 'UNAVAILABLE') counters.newlyMatured += 1; } catch (err) { errors.maturation += 1; log(`learning maturation: ${err.message}`); } }
-    return { matured: sweep.matured, pending: sweep.pending, unavailable: sweep.unavailable };
+    return { matured: sweep.matured, pending: sweep.pending, unavailable: sweep.unavailable, settledAtDeadline: sweep.settledAtDeadline, skippedRecent: sweep.skippedRecent, written: sweep.attachments.length }; // PUBLISH-FIX-92: the status names every outcome of a sweep, so a stalled sweep is visible
   }
 
   function learnTick(nowTs) {
