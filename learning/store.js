@@ -4,7 +4,7 @@
 // repaired in place and nothing is deleted. Reads are bounded. The store owns bytes only; meaning lives in the
 // pure modules that produce and consume these records.
 import path from 'node:path';
-import { existsSync, mkdirSync, readdirSync, readFileSync, createReadStream, statSync, openSync, fsyncSync, closeSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, createReadStream, statSync, openSync, fsyncSync, closeSync, readSync, fstatSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { appendJsonl, atomicWriteJson, readJsonl, readJsonBounded } from '../lib/jsonl.js';
 import {
@@ -79,10 +79,54 @@ export function createLearningStore({ dataDir, log = () => {} }) {
   // maintained on append; a size check against the file catches another writer and rebuilds. Same records, same laws.
   const cached = new Map(); // stream -> { rows, bytes }
   const fileBytes = (stream) => { try { return statSync(fileOf(stream)).size; } catch { return 0; } };
+  // PUBLISH-FIX-108 (2026-09-21). The cache is keyed on the file's SIZE, so any growth it did not itself make — the bucket
+  // restore, the gate study's child process, a sweep that appended more than the cache saw — threw the WHOLE cache away and
+  // re-read and re-validated every record from byte zero. Validation is not cheap: patternRecordError alone recomputes two
+  // SHA-256 canonical digests per record (learning/contracts.js), and these files hold tens of thousands of records.
+  // Production, deployment eb532bba at 03:41:
+  //     MAIN THREAD STALLED 5s: running JavaScript (CPU-bound on the main thread)
+  //     MAIN THREAD STACK (paused): canonicalDigest learning/contracts.js:53:39 <- patternRecordError learning/contracts.js:2…
+  //     CPU LOAD 60s: busy 58784ms idle 1845ms (event-loop utilization 97%)
+  // A five-second stall on the lane that carries the bite, against a 500 ms receipt-to-decision limit and a ten-second
+  // proposal law. These journals are APPEND-ONLY, so growth means new lines at the end: read and validate only the TAIL and
+  // extend the cache. Every new record is validated exactly as before — nothing is trusted unread — and the derived indexes
+  // are dropped so they rebuild lazily without any crypto. Anything that is not clean append-only growth (a shrink, or an
+  // offset that is not a line boundary) falls back to the full re-read it always did.
   function cachedRows(stream) {
     const bytes = fileBytes(stream); const c = cached.get(stream);
     if (c && c.bytes === bytes) return c.rows;
-    const rows = readValidated(stream); cached.set(stream, { rows, bytes, byId: null }); return rows;
+    if (c && Number.isSafeInteger(c.bytes) && bytes > c.bytes) {
+      const added = readValidatedTail(stream, c.bytes);
+      if (added !== null) { for (const r of added) c.rows.push(r); c.bytes = bytes; c.byId = null; c.latest = null; c.heads = null; counters.tailReads = (counters.tailReads ?? 0) + 1; counters.tailRows = (counters.tailRows ?? 0) + added.length; return c.rows; }
+    }
+    const rows = readValidated(stream); cached.set(stream, { rows, bytes, byId: null }); counters.fullReads = (counters.fullReads ?? 0) + 1; return rows;
+  }
+  // the bytes appended since `fromByte`, validated exactly like a full read. null means "not clean append-only growth" and the
+  // caller re-reads everything: the previous byte must be the newline that ended the last cached record, and the tail must end
+  // on a line boundary (a half-written final line is left for the next pass rather than parsed).
+  function readValidatedTail(stream, fromByte) {
+    const file = fileOf(stream); const validator = VALIDATORS[stream] ?? null;
+    let fd = null;
+    try {
+      fd = openSync(file, 'r');
+      if (fromByte > 0) { const prev = Buffer.alloc(1); if (readSync(fd, prev, 0, 1, fromByte - 1) !== 1 || prev[0] !== 0x0a) return null; }
+      const size = fstatSync(fd).size; if (size < fromByte) return null;
+      const len = size - fromByte; if (len === 0) return [];
+      const buf = Buffer.alloc(len); let off = 0;
+      while (off < len) { const n = readSync(fd, buf, off, len - off, fromByte + off); if (n <= 0) break; off += n; }
+      if (off !== len) return null;
+      const text = buf.subarray(0, off).toString('utf8');
+      if (!text.endsWith('\n')) return null; // a torn final line: fall back rather than parse half a record
+      const out = [];
+      for (const line of text.split('\n')) {
+        const t = line.trim(); if (!t) continue;
+        let rec; try { rec = JSON.parse(t); } catch { counters.corruptSkipped += 1; continue; }
+        if (validator) { const err = validator(rec); if (err) { counters.invalidRejected += 1; log(`learning store: withheld invalid ${stream} record (${err})`); continue; } }
+        out.push(rec);
+      }
+      return out;
+    } catch { return null; }
+    finally { if (fd !== null) { try { closeSync(fd); } catch { /* closed once */ } } }
   }
   // maintained only when the file was exactly where the cache left it; another writer in between drops the cache
   function noteAppended(stream, record, bytesBefore) { const c = cached.get(stream); if (!c) return; if (c.bytes !== bytesBefore) { cached.delete(stream); return; } c.rows.push(record); c.bytes = fileBytes(stream); c.heads = null; if (c.latest && record.opportunityId) { const prev = c.latest.get(record.opportunityId); if (!prev || record.attachedTs > prev.attachedTs) c.latest.set(record.opportunityId, record); } if (c.byId && record.opportunityId) { const l = c.byId.get(record.opportunityId); if (l) l.push(record); else c.byId.set(record.opportunityId, [record]); } }
