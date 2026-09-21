@@ -109,7 +109,21 @@ export const isMultipleOf = (value, step) => { const [x, y] = align(D(value), D(
 export const scaleOf = (value) => D(value).scale;
 // ---- conversions ---------------------------------------------------------------------------------------------------------
 // an exact JSON numeric source token (the reviver's context.source) -> canonical decimal; exponent forms are expanded exactly
+// PUBLISH-FIX-113 (2026-09-21): a bounded memo, exactly like parseDecimal's above. fromNumberLexeme is pure — the same lexeme
+// always canonicalises to the same string — and execution/feed.js calls it for EVERY price and quantity on every book level
+// and every print the venue sends (thousands a second with twenty live books). Production d58a8012, the sampled minute after
+// PUBLISH-FIX-111: `fromNumberLexeme 7% · parseLexemes 3% · normalize 3%` of a saturated main thread. Price and quantity
+// lexemes repeat heavily (a coin trades at a handful of levels for minutes at a time), so a hit skips two regexes, a BigInt
+// construction, a format and a parse for a string that is byte-identical to what they would produce. A malformed lexeme is
+// never memoised (it throws before the store), and the memo is cleared when full rather than growing without bound.
+const LEX_MEMO_MAX = 65_536; const lexMemo = new Map();
 export function fromNumberLexeme(lexeme) {
+  if (typeof lexeme === 'string') { const hit = lexMemo.get(lexeme); if (hit !== undefined) return hit; }
+  const out = fromNumberLexemeUncached(lexeme);
+  if (lexMemo.size >= LEX_MEMO_MAX) lexMemo.clear();
+  lexMemo.set(lexeme, out); return out;
+}
+function fromNumberLexemeUncached(lexeme) {
   if (typeof lexeme !== 'string' || !/^-?(0|[1-9]\d*)(\.\d+)?([eE][-+]?\d+)?$/.test(lexeme)) fail(`numeric lexeme malformed: ${String(lexeme).slice(0, 40)}`);
   const m = /^(-?)(\d+)(?:\.(\d+))?(?:[eE]([-+]?\d+))?$/.exec(lexeme); const sign = m[1]; const ip = m[2]; const fp = m[3] ?? ''; const exp = Number(m[4] ?? '0');
   const digits = ip + fp; let scale = fp.length - exp;

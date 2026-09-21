@@ -61,10 +61,21 @@ Digest law: `sha256` over the sorted repository-relative file list, each entry a
 ```
 FROZEN_FOR_PAPER
 judge/*.js       9453d3f2016629a2a19d0ebac6c951f3a39889554b9f7ddc3e0012ce4a3cd686
-execution/*.js   bfcff6846d4dfd157eb84c2a5504298ba55244c09afeb746f33a1f5d1095a9a4
+execution/*.js   f6421a32ef67c47a986541bed21aa3a6d5c3cce5e31dde3f7f7973a2788de025
 watch/watch.js   6f319a1ee72a2b43346b8d07f906bb3ca31566ca7e3be0180d57f551d8a1afe1
-all (49 files)   9af8b8db1c8636a0cd4a9cfb3870562219e3e7fe4927730a46877c857e4bbe47
+all (49 files)   57e646b7dfb774454cbb216f901cf59203dcb98cabfa0a23d5a7bf792dbe6b59
 ```
+
+### 4.44 Audited change — 2026-09-21 PUBLISH-FIX-113: `fromNumberLexeme` memoised (previous execution digest `bfcff6846d4d…`; now `f6421a32ef67…`; all `9af8b8db1c86…` → `57e646b7dfb7…`; judge and watch/watch.js UNCHANGED; 49 files)
+
+`execution/money.js` only. `execution/feed.js` canonicalises EVERY price and quantity on every book level and every print
+the venue sends through `fromNumberLexeme` — thousands a second with twenty live books — and the sampled minute after
+PUBLISH-FIX-111 on `d58a8012` read `fromNumberLexeme 7% · parseLexemes 3% · normalize 3%` of a saturated main thread. The
+function is pure: the same lexeme always canonicalises to the same string. It now carries a bounded memo exactly like
+`parseDecimal`'s (65,536 entries, cleared when full, never growing without bound); a hit returns the byte-identical string
+the two regexes, BigInt construction, format and parse would have produced, and a malformed lexeme throws before the store
+and is never remembered. Proven in `test/publish-fix-111-bounded-windows.test.js` FIX113-1 (5,000 random lexemes, hit ==
+miss, malformed throws on every call). The differential replay is green. Authority unchanged: PAPER_SIMULATION_ONLY.
 
 ### 4.43 Audited change — 2026-09-21 PUBLISH-FIX-112: `priorLow60` without a decimal parse per comparison (previous judge digest `b8d814731a3a…`; now `9453d3f20166…`; all `ad323dca8b88…` → `9af8b8db1c86…`; execution and watch/watch.js UNCHANGED; 49 files)
 

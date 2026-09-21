@@ -107,3 +107,19 @@ test('FIX112-2: windowFacts uses it for priorLow60 — the decimal-parse-per-com
   assert.match(src, /priorLow60: lows60\.length \? minDecimal\(lows60\) : null/);
   assert.equal(src.includes('lows60.reduce((a, b) => (M.lt(a, b) ? a : b))'), false);
 });
+
+// ---- PUBLISH-FIX-113: fromNumberLexeme memo (execution/money.js) — the same night, the next frame on the list --------------------
+test('FIX113-1: fromNumberLexeme is memoised exactly — same output, malformed input still throws and is never remembered', async () => {
+  const M = await import('../execution/money.js');
+  let x = 99; const rnd = () => { x = (x * 1103515245 + 12345) & 0x7fffffff; return x / 0x7fffffff; };
+  const lexemes = [];
+  for (let i = 0; i < 5000; i += 1) { const ip = Math.floor(rnd() * 100000); const fp = Math.floor(rnd() * 1e9); lexemes.push(rnd() < 0.2 ? `${ip}` : rnd() < 0.1 ? `${ip}.${fp}e-${Math.floor(rnd() * 6)}` : `${ip}.${String(fp).padStart(9, '0')}`); }
+  const first = lexemes.map((l) => M.fromNumberLexeme(l));
+  const second = lexemes.map((l) => M.fromNumberLexeme(l)); // every one a memo hit now
+  assert.deepEqual(second, first, 'a hit is byte-identical to a miss');
+  for (const l of lexemes.slice(0, 200)) assert.equal(M.parseDecimal(M.fromNumberLexeme(l)) !== undefined, true, 'still a valid decimal');
+  for (let k = 0; k < 2; k += 1) { let threw = false; try { M.fromNumberLexeme('12.3.4'); } catch { threw = true; } assert.equal(threw, true, `malformed throws on call ${k + 1} — never memoised`); }
+  const src = readFileSync('execution/money.js', 'utf8');
+  assert.match(src, /const LEX_MEMO_MAX = 65_536; const lexMemo = new Map\(\);/);
+  assert.match(src, /if \(lexMemo\.size >= LEX_MEMO_MAX\) lexMemo\.clear\(\);/, 'bounded, never unbounded growth');
+});
