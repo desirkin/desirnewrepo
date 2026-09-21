@@ -1,0 +1,533 @@
+From 593e69dcf177fe6278d8c4cf79ac3da3a073832e Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 21 Sep 2026 01:53:15 +0000
+Subject: [PATCH 1/2] =?UTF-8?q?PUBLISH-FIX-96:=20nothing=20stale=20blocks?=
+ =?UTF-8?q?=20=E2=80=94=20a=20hot=20slot=20is=20held=20only=20while=20it?=
+ =?UTF-8?q?=20is=20earned?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Owner directive: 'Nothing should be blocking. Nothing stale should just sit there blocking.'
+
+Three rules in the hot lane (the six deep-tape slots that carry a coin's live order book to the Judge)
+held a slot against a coin that had stopped earning it, or refused a coin for ever on one look:
+
+1. A hot pair was evicted ONLY to make room for a new nominee. With nothing new arriving, a coin whose
+   run ended an hour ago kept its subscription — and its share of a main thread at 88-91% — for ever.
+   Now: a slot is held only while the coin is still nominated (the watch's band of 12 is the
+   hysteresis); the moment it is not, it yields, waiting nominee or not. That path needs no venue
+   verification, so it runs before the selectUniverse guard.
+2. tenureMs was a two-hour FLOOR: even with a fresh runner waiting, the stale pair kept the slot.
+   Now minHoldMs = 10 min — a thrash guard, not a lease.
+3. NOT_VERIFIED_BY_VENUE_SELECTION was remembered in 'seen', so a coin the venue check refused once was
+   never looked at again that session. A runner's 24h volume BUILDS WHILE IT RUNS: under the floor at
+   03:00 and well over it at 10:00 is the normal shape of the thing we hunt. That refusal is now
+   retryable and never remembered.
+
+Held/pending exposure is never released. The Judge's law is untouched; authority NONE throughout.
+
+tape/run.js re-pinned (4ae7c8a9 -> 4e35ceac) with its audit entry in the SCOPE-5 fence.
+
+Tests: publish-fix-96-nothing-stale-blocks 5/5 — all five fail on the previous code. tape-hot-lane 4/4
+updated to the new law. Green: social-4f-scope 9, universe 9, wideeye 6, publish-fix-94 7,
+learning-volatility-watch 4, tape-resource-law 3, judge-composition 4, paper-runtime 8, coin-dossier 3.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01RoFoPS22WFW1oUnbWzPayd
+---
+ cobra.config.json                             |  2 +-
+ docs/JUDGE-PAPER-AUDIT.md                     | 15 ++++
+ tape/hot-lane.js                              | 49 ++++++++++---
+ tape/run.js                                   | 19 +++--
+ ...ublish-fix-96-nothing-stale-blocks.test.js | 71 +++++++++++++++++++
+ test/social-4f-scope.test.js                  | 14 +++-
+ test/tape-hot-lane.test.js                    | 24 ++++---
+ 7 files changed, 163 insertions(+), 31 deletions(-)
+ create mode 100644 test/publish-fix-96-nothing-stale-blocks.test.js
+
+diff --git a/cobra.config.json b/cobra.config.json
+index 4e13d3c..fc0cfa0 100644
+--- a/cobra.config.json
++++ b/cobra.config.json
+@@ -56,7 +56,7 @@
+       "maxLoopLagMs": 1000,
+       "shedFraction": 0.15
+     },
+-    "hotLane": { "slots": 6, "tenureMs": 7200000 }
++    "hotLane": { "slots": 6, "minHoldMs": 600000 }
+   },
+   "tape": {
+     "wsUrl": "wss://ws.kraken.com/v2",
+diff --git a/docs/JUDGE-PAPER-AUDIT.md b/docs/JUDGE-PAPER-AUDIT.md
+index 1f1bac6..a6daaf7 100644
+--- a/docs/JUDGE-PAPER-AUDIT.md
++++ b/docs/JUDGE-PAPER-AUDIT.md
+@@ -303,6 +303,21 @@ nothing (heavy selling +0.06% at 15 minutes, strong buying +0.07%). A line someb
+   Tests: publish-fix-94-watch-sees-runners FIX95-1 (the six tradable runners clear it, SYND/DUCK/BLUE dust does not, and at
+   the old floor only DRV survived); wideeye nomination-merge fixture moved to a $50k below-floor nominee; social-4f-scope
+   SCOPE-5 carries the audited exception.
++- `tape/hot-lane.js` + `tape/run.js` (re-pinned) + `cobra.config.json` (PUBLISH-FIX-96, 2026-09-21; owner directive: "Nothing should
++  be blocking. Nothing stale should just sit there blocking"): three rules in the hot lane held a deep-tape slot against a coin that
++  had stopped earning it, or refused a coin for ever on one look. (1) A hot pair was evicted ONLY to make room for a new nominee —
++  with nothing new arriving, a coin whose run ended an hour ago kept its order-book subscription, and its share of a main thread
++  already at 88-91%, indefinitely. A slot is now held only while the coin is still nominated by some source (the volatility watch's
++  band of 12 is the hysteresis); the moment it is not, it yields, whether or not anyone is waiting, and that path needs no venue
++  verification so it runs before the selectUniverse guard. (2) `tenureMs` was a two-hour FLOOR: even with a fresh runner waiting the
++  stale pair kept the slot. It is now `minHoldMs` = 10 min, a thrash guard, in HOT_LANE_DEFAULTS and in
++  universeExpansion.hotLane (audited in the SCOPE-5 config fence). (3) NOT_VERIFIED_BY_VENUE_SELECTION was written into `seen`, so a
++  coin the venue check refused once was never looked at again that session — and a runner's 24-hour volume BUILDS WHILE IT RUNS
++  (under the floor at 03:00, well over it at 10:00 is the normal shape). That refusal is now retryable and never remembered; a
++  nomination for a pair that is already hot is an affirmation, not a skip. Held/pending exposure (pinned) is never released. The
++  Judge is untouched. Tests: publish-fix-96-nothing-stale-blocks (5; all 5 fail on the previous code), tape-hot-lane (4, updated to
++  the new law). Green: social-4f-scope, universe, wideeye, publish-fix-94, learning-volatility-watch, tape-resource-law,
++  judge-composition, paper-runtime, coin-dossier.
+ - `tools/gate-study-process.js` / `tools/gate-study-child.js`: the join runs in a child process every 30 minutes (90 s
+   after boot first); the main thread never reads the ledger; the lesson lands in `data/learning/gate-lessons/lesson.json`
+   (+ `state.json` with the proposal history). `fly.js` composes the reader as the Judge's port.
+diff --git a/tape/hot-lane.js b/tape/hot-lane.js
+index 80960c1..1612a48 100644
+--- a/tape/hot-lane.js
++++ b/tape/hot-lane.js
+@@ -8,32 +8,59 @@
+ // sees the newcomer at once and — stamped at first sight — it preempts the oldest preparation tenant (judge/readiness.js
+ // law, unchanged). Held / pending exposure is never evicted; the resource law still applies to hot pairs like any other.
+ // Authority NONE: this widens what is WATCHED, never what may be traded.
+-export const HOT_LANE_VERSION = 'tape-hot-lane-1';
+-export const HOT_LANE_DEFAULTS = Object.freeze({ slots: 3, tenureMs: 2 * 60 * 60_000 });
++export const HOT_LANE_VERSION = 'tape-hot-lane-2';
++// PUBLISH-FIX-96 (2026-09-21, owner directive: "nothing stale should just sit there blocking"). Two rules in this planner held a
++// deep-tape slot against a coin that had earned it and no longer did:
++//   1. A hot pair was evicted ONLY to make room for a new nominee. With nothing new arriving, a coin whose run ended an hour ago
++//      kept its order-book subscription for ever. A slot is held while it is EARNED — the moment the coin is no longer nominated
++//      by any source (the volatility watch drops it when it falls out of the top `band`, which is the hysteresis), it yields,
++//      whether or not anyone is waiting. `minHoldMs` is the only guard, and it is a thrash guard (minutes), not a lease (hours).
++//   2. `tenureMs` was a two-hour FLOOR: even with a fresh runner waiting, the stale pair kept the slot until two hours were up.
++// And one refusal was remembered for ever:
++//   3. NOT_VERIFIED_BY_VENUE_SELECTION was written into `seen`, so a coin refused once by the venue check was never looked at
++//      again this session. A coin's 24-hour volume BUILDS WHILE IT RUNS: below the nomination floor at 03:00 and well above it
++//      at 10:00 is the normal shape of a runner. That "no" is about right now; it is never about the rest of the day.
++// Held or pending exposure (pinned) is never evicted. Authority NONE: this is which coins are WATCHED, never what may be traded.
++export const HOT_LANE_VERSION_1 = 'tape-hot-lane-1';
++export const HOT_LANE_DEFAULTS = Object.freeze({ slots: 3, minHoldMs: 10 * 60_000 });
+ 
+-// planHotAdoption({ nominations: [{ coin, ts }], carried: [{ symbol, coin, hot?, hotSinceTs? }], verified: [{ symbol, coin, ... }],
+-//                   pinned: Set<symbol>, seen: Set<coin>, nowTs, slots, tenureMs })
+-// -> { adopt: [pair with hot: true, hotSinceTs, cause], evict: [symbol], skipped: [{ coin, reason }], seen: Set }
+-export function planHotAdoption({ nominations = [], carried = [], verified = [], pinned = new Set(), seen = new Set(), nowTs = Date.now(), slots = HOT_LANE_DEFAULTS.slots, tenureMs = HOT_LANE_DEFAULTS.tenureMs } = {}) {
+-  const nextSeen = new Set(seen); const adopt = []; const evict = []; const skipped = [];
++// planHotAdoption({ nominations: [{ coin, ts }] (the CURRENT full set, not pre-filtered), carried: [{ symbol, coin, hot?, hotSinceTs? }],
++//                   verified: [{ symbol, coin, ... }], pinned: Set<symbol>, seen: Set<coin>, nowTs, slots, minHoldMs })
++// -> { adopt: [pair with hot: true, hotSinceTs, cause], evict: [symbol], released: [{ coin, symbol, reason, heldMs }], skipped: [{ coin, reason, retry? }], seen: Set }
++export function planHotAdoption({ nominations = [], carried = [], verified = [], pinned = new Set(), seen = new Set(), nowTs = Date.now(), slots = HOT_LANE_DEFAULTS.slots, minHoldMs = HOT_LANE_DEFAULTS.minHoldMs } = {}) {
++  const nextSeen = new Set(seen); const adopt = []; const evict = []; const skipped = []; const released = [];
+   const carriedByCoin = new Map(carried.map((p) => [p.coin, p]));
+   const hotNow = carried.filter((p) => p.hot === true).sort((a, b) => (a.hotSinceTs ?? 0) - (b.hotSinceTs ?? 0)); // oldest first
++  const nominatedNow = new Set(nominations.filter((n) => n && typeof n.coin === 'string').map((n) => n.coin));
++  // PUBLISH-FIX-96 rule 1: release every hot pair that is no longer nominated, before anyone asks for its slot
++  for (const p of hotNow) {
++    if (pinned.has(p.symbol)) continue;                         // held / pending exposure never yields
++    if (nominatedNow.has(p.coin)) continue;                     // still earning it
++    const heldMs = nowTs - (p.hotSinceTs ?? 0);
++    if (heldMs < minHoldMs) continue;                           // thrash guard only
++    evict.push(p.symbol); nextSeen.delete(p.coin);
++    released.push({ coin: p.coin, symbol: p.symbol, reason: 'NO_LONGER_NOMINATED', heldMs });
++  }
+   const fresh = nominations.filter((n) => n && typeof n.coin === 'string' && !seen.has(n.coin));
+   // PUBLISH-FIX-83 (full review item 15): `seen` used to be "seen once, refused forever" — a mover nominated while the hot slots were
+   // full was never retried, and an evicted coin could never come back. Now a HOT_LANE_FULL skip is NOT remembered (retried on the
+   // next pass), and an evicted coin leaves `seen` so a later nomination can re-adopt it. NOT_VERIFIED and ALREADY_CARRIED stay remembered.
+   for (const n of fresh) {
+-    if (carriedByCoin.has(n.coin)) { nextSeen.add(n.coin); skipped.push({ coin: n.coin, reason: 'ALREADY_CARRIED' }); continue; }
++    const already = carriedByCoin.get(n.coin);
++    // PUBLISH-FIX-96: a nomination for a pair that is ALREADY HOT is an affirmation that it still earns its slot, not a refusal to report
++    if (already) { nextSeen.add(n.coin); if (already.hot !== true) skipped.push({ coin: n.coin, reason: 'ALREADY_CARRIED' }); continue; }
+     const v = verified.find((p) => p.coin === n.coin);
+-    if (!v) { nextSeen.add(n.coin); skipped.push({ coin: n.coin, reason: 'NOT_VERIFIED_BY_VENUE_SELECTION' }); continue; } // floor, status, exclusion, cap: the selection said no
++    // PUBLISH-FIX-96 rule 3: a venue refusal is about RIGHT NOW and is never remembered — a runner's 24 h volume builds while it runs
++    if (!v) { skipped.push({ coin: n.coin, reason: 'NOT_VERIFIED_BY_VENUE_SELECTION', retry: true }); continue; }
+     const hotCount = hotNow.length + adopt.length - evict.length;
+     if (hotCount >= slots) {
+-      const victim = hotNow.find((p) => !pinned.has(p.symbol) && !evict.includes(p.symbol) && nowTs - (p.hotSinceTs ?? 0) >= tenureMs);
++      // PUBLISH-FIX-96 rule 2: the victim is the oldest hot pair past the thrash guard (was: past a two-hour lease)
++      const victim = hotNow.find((p) => !pinned.has(p.symbol) && !evict.includes(p.symbol) && nowTs - (p.hotSinceTs ?? 0) >= minHoldMs);
+       if (!victim) { skipped.push({ coin: n.coin, reason: 'HOT_LANE_FULL', retry: true }); continue; }
+       evict.push(victim.symbol); nextSeen.delete(victim.coin);
+     }
+     nextSeen.add(n.coin);
+     adopt.push({ ...v, hot: true, hotSinceTs: nowTs, cause: typeof n.cause === 'string' ? n.cause.slice(0, 80) : 'WIDE_EYE_NOMINATION', nominatedTs: n.ts ?? null });
+   }
+-  return { version: HOT_LANE_VERSION, adopt, evict, skipped, seen: nextSeen };
++  return { version: HOT_LANE_VERSION, adopt, evict, released, skipped, seen: nextSeen };
+ }
+diff --git a/tape/run.js b/tape/run.js
+index faae224..4def244 100644
+--- a/tape/run.js
++++ b/tape/run.js
+@@ -146,21 +146,27 @@ export async function runTape({ minutes = null, chaosAfterSec = null, log = cons
+   }
+ 
+   // ---- hot lane (PUBLISH-FIX-28): a WIDE EYE nominee joins the deep tape NOW, not next session -------------------------
+-  let hotSeen = new Set(); let hotLaneBusy = false; let hotLaneSkips = 0; const hotLane = { slots: xp.hotLane?.slots ?? HOT_LANE_DEFAULTS.slots, tenureMs: xp.hotLane?.tenureMs ?? HOT_LANE_DEFAULTS.tenureMs };
++  let hotSeen = new Set(); let hotLaneBusy = false; let hotLaneSkips = 0; const hotLane = { slots: xp.hotLane?.slots ?? HOT_LANE_DEFAULTS.slots, minHoldMs: xp.hotLane?.minHoldMs ?? HOT_LANE_DEFAULTS.minHoldMs }; // PUBLISH-FIX-96: a thrash guard, not a lease
+   async function adoptHotNominations() {
+     if (stopping || hotLaneBusy) return;
+     // PUBLISH-FIX-54: the LEARNED RE-LOOK's coins ride the same hot lane and the same venue verification as the wide eye's
+     // PUBLISH-FIX-66: the VOLATILITY WATCH's movers ride the same hot lane (the owner: volume and volatility, never BTC)
+-    const nominations = [...readWideEyeNominationsToday(), ...readLearnedRelooksToday({ dataDir: dataDir() }), ...readVolatilityWatchNow({ dataDir: dataDir() })].filter((n) => n && typeof n.coin === 'string' && !hotSeen.has(n.coin));
+-    if (!nominations.length) return;
++    // PUBLISH-FIX-96 (2026-09-21): the CURRENT full nomination set is passed to the planner (it applies `seen` itself) so it can
++    // see which hot pairs are STILL nominated and release the ones that are not. Pre-filtering by `seen` here hid that from it.
++    const nominations = [...readWideEyeNominationsToday(), ...readLearnedRelooksToday({ dataDir: dataDir() }), ...readVolatilityWatchNow({ dataDir: dataDir() })].filter((n) => n && typeof n.coin === 'string');
++    const nominatedNow = new Set(nominations.map((n) => n.coin));
++    // a hot pair no longer nominated must yield even when nothing new is waiting; that needs no venue verification, so it runs first
++    const stale = [...pairs.values()].filter((p) => p.hot === true && !pinnedSymbols().has(p.symbol) && !nominatedNow.has(p.coin) && Date.now() - (p.hotSinceTs ?? 0) >= hotLane.minHoldMs);
++    const freshNominees = nominations.filter((n) => !hotSeen.has(n.coin));
++    if (!stale.length && !freshNominees.length) return;
+     // review finding (PUBLISH-FIX-83 item 15): a nominee refused for a full lane is retried each minute now — but a full lane with no
+     // tenure-eligible pair cannot adopt anything, so the venue verification (two REST fetches and a universe-record rewrite) is not run
+-    { const hotNow = [...pairs.values()].filter((p) => p.hot === true); const pinnedNow = pinnedSymbols(); const canYield = hotNow.some((p) => !pinnedNow.has(p.symbol) && Date.now() - (p.hotSinceTs ?? 0) >= hotLane.tenureMs); const allCarried = nominations.every((n) => [...pairs.values()].some((p) => p.coin === n.coin)); if (hotNow.length >= hotLane.slots && !canYield && !allCarried) { hotLaneSkips = (hotLaneSkips ?? 0) + 1; if (hotLaneSkips % 30 === 1) log(`[${nowIso()}] HOT LANE full (${hotNow.length}/${hotLane.slots}, none past tenure): ${nominations.length} nominee(s) wait; verification not run`); return; } }
++    { const hotNow = [...pairs.values()].filter((p) => p.hot === true); const pinnedNow = pinnedSymbols(); const canYield = hotNow.some((p) => !pinnedNow.has(p.symbol) && Date.now() - (p.hotSinceTs ?? 0) >= hotLane.minHoldMs); const allCarried = freshNominees.every((n) => [...pairs.values()].some((p) => p.coin === n.coin)); if (!stale.length && hotNow.length >= hotLane.slots && !canYield && !allCarried) { hotLaneSkips += 1; return; } } // PUBLISH-FIX-96: a stale slot to release is always worth the pass
+     hotLaneBusy = true;
+     try {
+       const selection = await selectUniverse(config); // the SAME venue verification as the daily selection (floor, status, exclusion, cap)
+       if (selection.error) { writeEvent('HOT_LANE_VERIFY_FAILED', { error: selection.error, coins: nominations.map((n) => n.coin) }); return; }
+-      const plan = planHotAdoption({ nominations, carried: [...pairs.values()], verified: selection.verified ?? selection.pairs, pinned: pinnedSymbols(), seen: hotSeen, nowTs: Date.now(), slots: hotLane.slots, tenureMs: hotLane.tenureMs });
++      const plan = planHotAdoption({ nominations, carried: [...pairs.values()], verified: selection.verified ?? selection.pairs, pinned: pinnedSymbols(), seen: hotSeen, nowTs: Date.now(), slots: hotLane.slots, minHoldMs: hotLane.minHoldMs });
+       hotSeen = plan.seen;
+       for (const symbol of plan.evict) { const p = pairs.get(symbol); unsubscribePair(symbol); dropPair(symbol); writeEvent('PAIR_HOT_YIELDED', { symbol, hotForMs: Date.now() - (p?.hotSinceTs ?? Date.now()) }); log(`[${nowIso()}] HOT LANE: ${p?.coin ?? symbol} yields its hot slot after ${Math.round((Date.now() - (p?.hotSinceTs ?? Date.now())) / 60000)} min`); }
+       for (const p of plan.adopt) {
+@@ -168,7 +174,8 @@ export async function runTape({ minutes = null, chaosAfterSec = null, log = cons
+         writeEvent('PAIR_HOT_ADOPTED', { symbol: p.symbol, coin: p.coin, usdVol24h: p.usdVol24h ?? null, cause: p.cause, nominatedTs: p.nominatedTs });
+         log(`[${nowIso()}] HOT LANE: ${p.coin} joins the deep tape now (${p.cause}; ${p.usdVol24h ? `$${(p.usdVol24h / 1e6).toFixed(1)}M 24h` : 'volume n/a'}; hot slots ${[...pairs.values()].filter((x) => x.hot).length}/${hotLane.slots}) — the Judge sees it on its next nomination pass`);
+       }
+-      for (const k of plan.skipped) { if (k.reason !== 'ALREADY_CARRIED') log(`[${nowIso()}] HOT LANE: ${k.coin} not adopted (${k.reason})`); }
++      for (const r of plan.released ?? []) log(`[${nowIso()}] HOT LANE: ${r.coin} releases its hot slot — no longer among the movers (held ${Math.round(r.heldMs / 60000)} min)`); // PUBLISH-FIX-96
++      for (const k of plan.skipped) { if (k.reason !== 'ALREADY_CARRIED' && k.retry !== true) log(`[${nowIso()}] HOT LANE: ${k.coin} not adopted (${k.reason})`); }
+       { const m = mergeCarriedIntoCurrentUniverse([...pairs.values()].filter((x) => x.hot), { yielded: plan.evict }); if (!m.ok) log(`[${nowIso()}] HOT LANE: current-universe record not updated (${m.reason}); the Judge sees the newcomer at the next selection`); } // PUBLISH-FIX-83 item 15: yielded pairs leave the record; the carried hot pairs are re-merged after EVERY selection (selectUniverse rewrote the record without them — review finding)
+     } catch (err) { log(`[${nowIso()}] HOT LANE degraded (tape unaffected): ${String(err?.message ?? err).slice(0, 160)}`); }
+     finally { hotLaneBusy = false; }
+diff --git a/test/publish-fix-96-nothing-stale-blocks.test.js b/test/publish-fix-96-nothing-stale-blocks.test.js
+new file mode 100644
+index 0000000..685357d
+--- /dev/null
++++ b/test/publish-fix-96-nothing-stale-blocks.test.js
+@@ -0,0 +1,71 @@
++// PUBLISH-FIX-96 (2026-09-21, owner directive: "Nothing should be blocking. Nothing stale should just sit there blocking").
++//
++// The hot lane is the six deep-tape slots that carry a coin's live order book to the Judge. Three rules in it held a slot against
++// a coin that had stopped earning it, or refused a coin for ever on one bad look:
++//   1. A hot pair was evicted ONLY to make room for a new nominee. With nothing new arriving, a coin whose run ended an hour ago
++//      kept its slot — and its share of a main thread already at 88-91% — for ever.
++//   2. `tenureMs` was a TWO-HOUR FLOOR: even with a fresh runner waiting, the stale pair held the slot until two hours were up.
++//   3. NOT_VERIFIED_BY_VENUE_SELECTION was remembered in `seen`, so a coin refused once by the venue check was never looked at
++//      again that session. A runner's 24-hour volume BUILDS WHILE IT RUNS: under the floor at 03:00 and well over it at 10:00 is
++//      the normal shape of the thing we are hunting. That refusal is about right now, never about the rest of the day.
++// Held or pending exposure (pinned) is never evicted. Authority NONE: this is which coins are WATCHED, never what may be traded.
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import { planHotAdoption, HOT_LANE_DEFAULTS } from '../tape/hot-lane.js';
++
++const T = 1_789_000_000_000; const MIN = 60_000; const H = 60 * MIN;
++const pair = (coin, extra = {}) => ({ coin, symbol: `${coin}/USD`, major: false, depth: 25, usdVol24h: 10_000_000, ...extra });
++const hot = (coin, sinceMsAgo) => pair(coin, { hot: true, hotSinceTs: T - sinceMsAgo });
++
++test('FIX96-1: a hot pair that is no longer among the movers yields its slot even though NOTHING is waiting for it', () => {
++  // DEAD ran an hour ago and has fallen out of the watch's picks; LIVE is still nominated. No new nominee at all.
++  const carried = [pair('BTC'), hot('DEAD', 40 * MIN), hot('LIVE', 40 * MIN)];
++  const plan = planHotAdoption({ nominations: [{ coin: 'LIVE' }], carried, verified: carried, nowTs: T, slots: 6 });
++  assert.deepEqual(plan.evict, ['DEAD/USD'], 'the slot is released the moment it stops being earned (before the fix: held for ever)');
++  assert.deepEqual(plan.released, [{ coin: 'DEAD', symbol: 'DEAD/USD', reason: 'NO_LONGER_NOMINATED', heldMs: 40 * MIN }]);
++  assert.deepEqual(plan.adopt, [], 'nothing was waiting — the release is the whole point');
++  assert.equal(plan.seen.has('DEAD'), false, 'and it leaves `seen`, so it can come back the moment it runs again');
++});
++
++test('FIX96-2: the thrash guard is minutes, not a two-hour lease — a stale pair inside the guard is kept, past it it goes', () => {
++  const carried = [hot('FRESH', 3 * MIN), hot('STALE', 12 * MIN)];
++  const none = planHotAdoption({ nominations: [], carried, verified: carried, nowTs: T, slots: 6, minHoldMs: 10 * MIN });
++  assert.deepEqual(none.evict, ['STALE/USD'], 'past the guard it yields; the three-minute-old pair is protected from churn');
++  // and with a runner waiting, the lane full, the oldest yields at the guard — not after two hours
++  const full = [hot('A', 30 * MIN), hot('B', 25 * MIN), hot('C', 20 * MIN)];
++  const alive = [{ coin: 'A' }, { coin: 'B' }, { coin: 'C' }];
++  const verified = [...full, pair('RUNNER')];
++  const plan = planHotAdoption({ nominations: [...alive, { coin: 'RUNNER' }], carried: full, verified, nowTs: T, slots: 3, minHoldMs: 10 * MIN });
++  assert.deepEqual(plan.evict, ['A/USD'], 'the oldest yields after the guard (before the fix: nothing moved for two hours)');
++  assert.deepEqual(plan.adopt.map((p) => p.coin), ['RUNNER']);
++  // the old law, expressed as the guard it used to be, still refuses — this is the exact behaviour that blocked the runners
++  const oldLaw = planHotAdoption({ nominations: [...alive, { coin: 'RUNNER' }], carried: full, verified, nowTs: T, slots: 3, minHoldMs: 2 * H });
++  assert.deepEqual(oldLaw.adopt, []); assert.deepEqual(oldLaw.skipped, [{ coin: 'RUNNER', reason: 'HOT_LANE_FULL', retry: true }]);
++});
++
++test('FIX96-3: a coin refused by the venue check is looked at again — its volume builds while it runs', () => {
++  // 03:00 — CTSI has done $40k today and is under the $100k nomination floor: the venue selection does not verify it
++  const carried = [pair('BTC')];
++  const early = planHotAdoption({ nominations: [{ coin: 'CTSI' }], carried, verified: [pair('BTC')], nowTs: T, slots: 6 });
++  assert.deepEqual(early.adopt, []);
++  assert.deepEqual(early.skipped, [{ coin: 'CTSI', reason: 'NOT_VERIFIED_BY_VENUE_SELECTION', retry: true }]);
++  assert.equal(early.seen.has('CTSI'), false, 'the refusal is NOT remembered (before the fix: never looked at again all session)');
++  // 10:00 — the same coin has run 22% and now does $192k a day, so the venue verifies it. It must be adoptable.
++  const later = planHotAdoption({ nominations: [{ coin: 'CTSI' }], carried, verified: [pair('BTC'), pair('CTSI', { usdVol24h: 192_000 })], seen: early.seen, nowTs: T + 7 * H, slots: 6 });
++  assert.deepEqual(later.adopt.map((p) => p.coin), ['CTSI'], 'the runner gets in');
++  assert.equal(later.adopt[0].hot, true);
++});
++
++test('FIX96-4: held or pending exposure is never released, however stale it looks', () => {
++  const carried = [hot('HELD', 3 * H), hot('DEAD', 3 * H)];
++  const plan = planHotAdoption({ nominations: [], carried, verified: carried, pinned: new Set(['HELD/USD']), nowTs: T, slots: 6 });
++  assert.deepEqual(plan.evict, ['DEAD/USD'], 'the unheld stale pair goes');
++  assert.ok(!plan.evict.includes('HELD/USD'), 'the pair carrying exposure stays, whatever the watch thinks of it');
++});
++
++test('FIX96-5: the shipped law — a thrash guard in minutes, and the config carries it', async () => {
++  assert.deepEqual(HOT_LANE_DEFAULTS, { slots: 3, minHoldMs: 10 * MIN });
++  assert.equal('tenureMs' in HOT_LANE_DEFAULTS, false, 'the two-hour lease is gone, not renamed');
++  const { loadConfig } = await import('../lib/config.js');
++  assert.deepEqual(loadConfig().universeExpansion.hotLane, { slots: 6, minHoldMs: 10 * MIN });
++});
+diff --git a/test/social-4f-scope.test.js b/test/social-4f-scope.test.js
+index 0c66f26..01a4fa0 100644
+--- a/test/social-4f-scope.test.js
++++ b/test/social-4f-scope.test.js
+@@ -167,7 +167,7 @@ test('SCOPE-5 (7). research configuration is closed: no wildcard, bounded caps,
+   for (const k of Object.keys(baseline)) {
+     if (k === 'universe') continue; // audited below
+     // PUBLISH-FIX-83 item 38 (2026-09-20): universeExpansion.resource.maxHeapMb 512 -> 3000, ONE value with the paper profile's overlay (config/paper-runtime.json) — the two used to disagree
+-    if (k === 'universeExpansion') { const { hotLane, resource, ...rest } = current[k]; assert.deepEqual(hotLane, { slots: 6, tenureMs: 7_200_000 }); assert.deepEqual(resource, { ...baseline[k].resource, maxHeapMb: 3000 }); const { resource: _r, ...baseRest } = baseline[k]; assert.deepEqual(rest, baseRest, 'config.universeExpansion unchanged but for hotLane and the heap ceiling'); continue; }
++    if (k === 'universeExpansion') { const { hotLane, resource, ...rest } = current[k]; assert.deepEqual(hotLane, { slots: 6, minHoldMs: 600_000 }); /* PUBLISH-FIX-96 (2026-09-21, owner: "nothing stale should just sit there blocking"): the two-hour tenure was a LEASE — a hot pair kept its deep-tape slot for two hours after its run ended, and was evicted only when someone else wanted it. A slot is now held only while the coin is still nominated; minHoldMs is a thrash guard. */ assert.deepEqual(resource, { ...baseline[k].resource, maxHeapMb: 3000 }); const { resource: _r, ...baseRest } = baseline[k]; assert.deepEqual(rest, baseRest, 'config.universeExpansion unchanged but for hotLane and the heap ceiling'); continue; }
+     // PUBLISH-FIX-95 (2026-09-21): wideeye.nominationFloorUsd 2_000_000 -> 100_000, ONE value. A nominated coin must clear this 24-hour
+     // dollar floor before tape/universe.js will verify it for the hot lane, so at $2M the VOLATILITY WATCH's movers were ranked, picked
+     // and then refused at the venue check: of the 77 Kraken USD pairs that ran >= 10% on 2026-09-20, the liquid ones sat at $180k-$264k
+@@ -328,7 +328,17 @@ test('SCOPE-8 (9/10). protected surfaces are byte-identical to 9c17372; authorit
+     // surface. Tests: test/publish-fix-84-silent-feed.test.js. Same publish, reviewer finding: a subscribe ACK clears the pair's failure
+     // count and a NEW connection re-tries every subscribe-failed pair (`unavailable` was a one-way door for the life of the process; a
+     // resource-shed pair still waits for the resource law). Subscriptions only.
+-    'tape/run.js': '4ae7c8a9a65e35d5ca085af1fffdfc426ac8f3cba1738f0931b4e07ff2cca369',
++    // PUBLISH-FIX-96 (2026-09-21, owner directive: "nothing stale should just sit there blocking"). Three changes in the HOT LANE poll,
++    // subscriptions only — no trading, control or model surface, and the Judge's law is untouched:
++    //   (a) the CURRENT full nomination set is passed to planHotAdoption (it applies `seen` itself) instead of being pre-filtered by
++    //       `seen` here, so the planner can see which hot pairs are STILL nominated and release the ones that are not;
++    //   (b) a hot pair no longer nominated is released even when nothing is waiting for its slot — that path needs no venue
++    //       verification, so it runs before the selectUniverse guard and the guard no longer short-circuits a pass that has a
++    //       stale slot to free;
++    //   (c) hotLane.tenureMs (a two-hour lease) -> hotLane.minHoldMs (a thrash guard), and retryable skips are no longer logged
++    //       every minute. Tests: test/publish-fix-96-nothing-stale-blocks.test.js (5; all fail on the previous code),
++    //       test/tape-hot-lane.test.js.
++    'tape/run.js': '4e35ceac2bd000409c04154c41708929b0a15dcb6a22d6bfdf25fcdbb6f4f1f6',
+     'rumor2/providers/x-official.js': '19d71247854289e5c8ee3c2f2ba0996ace78688c85bae88f160403cd2748ce0a',
+     'rumor2/social-time.js': '414f5101723cc8f77ae9c99a6477dbd68f1eeac6d856f015fca763894e9e2a98',
+     // PUBLISH-FIX-11 (2026-09-16): reconciler.hydrate reuses the replay's derived index entry for each target when the
+diff --git a/test/tape-hot-lane.test.js b/test/tape-hot-lane.test.js
+index ff6f4ac..7b949a6 100644
+--- a/test/tape-hot-lane.test.js
++++ b/test/tape-hot-lane.test.js
+@@ -17,23 +17,25 @@ test('a fresh nominee the venue selection verifies is adopted hot; an unverified
+   const verified = [pair('BTC'), pair('ETH'), pair('SOL'), pair('PUMP', { usdVol24h: 4_000_000 })];
+   const plan = planHotAdoption({ nominations: [{ coin: 'PUMP', ts: '2026-09-17T08:00:00Z', cause: 'RIPPLE zVol=4.2' }, { coin: 'TINY', ts: 'x' }, { coin: 'BTC', ts: 'y' }], carried, verified, nowTs: T });
+   assert.deepEqual(plan.adopt.map((p) => [p.coin, p.hot, p.hotSinceTs, p.cause]), [['PUMP', true, T, 'RIPPLE zVol=4.2']]);
+-  assert.deepEqual(plan.skipped, [{ coin: 'TINY', reason: 'NOT_VERIFIED_BY_VENUE_SELECTION' }, { coin: 'BTC', reason: 'ALREADY_CARRIED' }]);
+-  assert.deepEqual([...plan.seen].sort(), ['BTC', 'PUMP', 'TINY']);
++  // PUBLISH-FIX-96: a venue refusal is retried, never remembered — a runner's 24 h volume builds WHILE it runs
++  assert.deepEqual(plan.skipped, [{ coin: 'TINY', reason: 'NOT_VERIFIED_BY_VENUE_SELECTION', retry: true }, { coin: 'BTC', reason: 'ALREADY_CARRIED' }]);
++  assert.deepEqual([...plan.seen].sort(), ['BTC', 'PUMP'], 'PUBLISH-FIX-96: TINY is NOT remembered as refused');
+   const again = planHotAdoption({ nominations: [{ coin: 'PUMP' }, { coin: 'TINY' }], carried, verified, seen: plan.seen, nowTs: T + 1000 });
+-  assert.equal(again.adopt.length, 0); assert.equal(again.skipped.length, 0, 'seen nominees are not planned twice');
++  assert.equal(again.adopt.length, 0); assert.deepEqual(again.skipped, [{ coin: 'TINY', reason: 'NOT_VERIFIED_BY_VENUE_SELECTION', retry: true }], 'the adopted nominee is not planned twice; the refused one is looked at again');
+ });
+ 
+-test('the hot lane is bounded: with three hot pairs a fourth nominee waits until the oldest hot tenure (2 h) is up, then the oldest yields; a pinned (held) hot pair never yields', () => {
++test('the hot lane is bounded: a fourth nominee waits while every hot pair is inside its thrash guard, then the oldest yields; a pinned (held) hot pair never yields', () => {
+   const hot = [pair('A', { hot: true, hotSinceTs: T - 3 * H }), pair('B', { hot: true, hotSinceTs: T - 2.5 * H }), pair('C', { hot: true, hotSinceTs: T - 10 * 60_000 })];
+   const carried = [pair('BTC'), ...hot]; const verified = [...carried, pair('D'), pair('E')];
+-  const full = planHotAdoption({ nominations: [{ coin: 'D' }], carried, verified, nowTs: T, slots: 3, tenureMs: 4 * H });
+-  assert.deepEqual(full.adopt, []); assert.deepEqual(full.skipped, [{ coin: 'D', reason: 'HOT_LANE_FULL', retry: true }]); assert.equal(full.seen.has('D'), false, 'PUBLISH-FIX-83 item 15: a nominee refused for a full lane is retried on the next pass, not remembered as seen');
+-  const yields = planHotAdoption({ nominations: [{ coin: 'D' }, { coin: 'E' }], carried, verified, nowTs: T, slots: 3, tenureMs: 2 * H });
+-  assert.deepEqual(yields.evict, ['A/USD', 'B/USD'], 'the two hot pairs past their tenure yield, oldest first'); assert.deepEqual(yields.adopt.map((p) => p.coin), ['D', 'E']); assert.deepEqual([...yields.seen].sort(), ['D', 'E']);
+-  const back = planHotAdoption({ nominations: [{ coin: 'A' }], carried: [pair('BTC'), pair('C', { hot: true, hotSinceTs: T }), pair('D', { hot: true, hotSinceTs: T }), pair('E', { hot: true, hotSinceTs: T })], verified: [...verified], seen: yields.seen, nowTs: T + 1000, slots: 4, tenureMs: 2 * H }); assert.deepEqual(back.adopt.map((p) => p.coin), ['A'], 'an evicted coin can be nominated and adopted again later');
+-  const pinned = planHotAdoption({ nominations: [{ coin: 'D' }], carried, verified, pinned: new Set(['A/USD', 'B/USD']), nowTs: T, slots: 3, tenureMs: 2 * H });
++  const alive = [{ coin: 'A' }, { coin: 'B' }, { coin: 'C' }]; // still nominated, so nothing is released
++  const full = planHotAdoption({ nominations: [...alive, { coin: 'D' }], carried, verified, nowTs: T, slots: 3, minHoldMs: 4 * H });
++  assert.deepEqual(full.adopt, []); assert.deepEqual(full.released, [], 'A, B and C are still nominated: nothing is released'); assert.deepEqual(full.skipped, [{ coin: 'D', reason: 'HOT_LANE_FULL', retry: true }]); assert.equal(full.seen.has('D'), false, 'PUBLISH-FIX-83 item 15: a nominee refused for a full lane is retried on the next pass, not remembered as seen');
++  const yields = planHotAdoption({ nominations: [...alive, { coin: 'D' }, { coin: 'E' }], carried, verified, nowTs: T, slots: 3, minHoldMs: 2 * H });
++  assert.deepEqual(yields.evict, ['A/USD', 'B/USD'], 'the two hot pairs past the thrash guard yield, oldest first'); assert.deepEqual(yields.adopt.map((p) => p.coin), ['D', 'E']); assert.deepEqual([...yields.seen].sort(), ['C', 'D', 'E'], 'PUBLISH-FIX-96: C is hot AND still nominated — affirmed, so it stays seen; A and B yielded and left seen so they can come back');
++  const back = planHotAdoption({ nominations: [{ coin: 'A' }, { coin: 'C' }, { coin: 'D' }, { coin: 'E' }], carried: [pair('BTC'), pair('C', { hot: true, hotSinceTs: T }), pair('D', { hot: true, hotSinceTs: T }), pair('E', { hot: true, hotSinceTs: T })], verified: [...verified], seen: yields.seen, nowTs: T + 1000, slots: 4, minHoldMs: 2 * H }); assert.deepEqual(back.adopt.map((p) => p.coin), ['A'], 'an evicted coin can be nominated and adopted again later');
++  const pinned = planHotAdoption({ nominations: [...alive, { coin: 'D' }], carried, verified, pinned: new Set(['A/USD', 'B/USD']), nowTs: T, slots: 3, minHoldMs: 2 * H });
+   assert.deepEqual(pinned.evict, []); assert.deepEqual(pinned.skipped, [{ coin: 'D', reason: 'HOT_LANE_FULL', retry: true }], 'held exposure is never evicted for a nominee');
+-  assert.deepEqual(HOT_LANE_DEFAULTS, { slots: 3, tenureMs: 2 * H });
++  assert.deepEqual(HOT_LANE_DEFAULTS, { slots: 3, minHoldMs: 10 * 60_000 });
+ });
+ 
+ test('the current-universe record becomes a superset of the carried hot pairs; only this session\'s nominations are read', async () => {
+-- 
+2.43.0
+
+
+From eef9b3a9dcd22f462d47fe202c650aaacea2ece5 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 21 Sep 2026 02:00:20 +0000
+Subject: [PATCH 2/2] =?UTF-8?q?PUBLISH-FIX-97:=20the=20bite=20lane=20stops?=
+ =?UTF-8?q?=20blocking=20on=20the=20disk=20=E2=80=94=20the=20tape=20I/O=20?=
+ =?UTF-8?q?lane=20is=20ON?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The deployment's own instruments, read live tonight:
+  boot CPU profile   'busy 14078ms idle 45962ms - top: fsync 78% 10979ms'
+  JUDGE FUNNEL 01:45 'LOOP 119 stalls over 100 ms (worst 2526 ms, 46161 ms blocked)'
+                     'DB tx p50 320 / p95 10892 / max 20346 ms (statements/tx 4, bytes/tx 0 KB)'
+                     'pool checkout wait max 213 ms (failures 0)'
+                     'journal commit p50 547 / p95 40850 / max 48629 ms'
+                     'decision compute max 30914 ms' · 'top refusals ... PROPOSAL_EXPIRED_10S 2'
+
+Four statements carrying ZERO kilobytes took twenty seconds while the pool handed out a connection in
+one millisecond. The database was not slow — the process could not come back to it, because it was
+inside fsync, writing every book update, trade and event synchronously as it arrived (240,017 book
+updates in eighteen minutes).
+
+judge/judge.js gives a hypothesis lock proposalExpiryMs (10 s) to become durable, and expires the
+proposal past the same 10 s. A 40-second journal commit therefore makes an entry impossible however
+good the setup is. That is a far better explanation of a zero-bite record than any gate.
+
+Ticket B built and tested the write-behind buffer for exactly this and left it opt-in behind
+SERPENT_TAPE_WRITE_BEHIND. Nothing ever turned it on. The paper profile's tape row now carries
+writeBehind: true and profileEnvironment derives the flag from that row (absent means off, never
+implied). A flush error never reaches the bite lane; tape/run.js drains it on a clean stop.
+
+The 10-second proposal law is NOT relaxed — the fix is the disk, not the deadline. No policy byte
+changed; the fee080 account binding is untouched.
+
+Tests: publish-fix-97-io-lane-on 3/3 (FIX97-1 fails on the previous profile). Green: paper-runtime 8,
+write-behind 5, tape-store-write-behind 2, tape-startup 5, social-4f-scope 9, publish-fix-96 5.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01RoFoPS22WFW1oUnbWzPayd
+---
+ config/paper-runtime.json              |  2 +-
+ docs/JUDGE-PAPER-AUDIT.md              | 16 ++++++++
+ paper/profile.js                       |  8 ++++
+ test/publish-fix-97-io-lane-on.test.js | 54 ++++++++++++++++++++++++++
+ 4 files changed, 79 insertions(+), 1 deletion(-)
+ create mode 100644 test/publish-fix-97-io-lane-on.test.js
+
+diff --git a/config/paper-runtime.json b/config/paper-runtime.json
+index fcdc0fc..088ad48 100644
+--- a/config/paper-runtime.json
++++ b/config/paper-runtime.json
+@@ -28,7 +28,7 @@
+  },
+  "groups": {
+   "coreObservation": {
+-   "tape": { "desiredState": "ON", "blockerPolicy": "BLOCK_PAPER", "module": "tape/run.js", "authority": "NONE", "note": "Kraken public WebSocket v2 market data; the only feed the Judge accepts" },
++   "tape": { "desiredState": "ON", "blockerPolicy": "BLOCK_PAPER", "module": "tape/run.js", "authority": "NONE", "writeBehind": true, "note": "Kraken public WebSocket v2 market data; the only feed the Judge accepts. writeBehind ON (PUBLISH-FIX-97): appends and coalesced latest writes go through the background flusher so the bite lane never blocks on fsync" },
+    "wideEye": { "desiredState": "ON", "blockerPolicy": "DEGRADE", "module": "survey/wideeye.js", "authority": "NONE" },
+    "universeExpansion": { "desiredState": "ON", "blockerPolicy": "DEGRADE", "module": "tape/universe.js", "authority": "NONE" },
+    "costExecutability": { "desiredState": "ON", "blockerPolicy": "BLOCK_PAPER", "module": "cost/model.js", "authority": "NONE" },
+diff --git a/docs/JUDGE-PAPER-AUDIT.md b/docs/JUDGE-PAPER-AUDIT.md
+index a6daaf7..49e18fe 100644
+--- a/docs/JUDGE-PAPER-AUDIT.md
++++ b/docs/JUDGE-PAPER-AUDIT.md
+@@ -318,6 +318,22 @@ nothing (heavy selling +0.06% at 15 minutes, strong buying +0.07%). A line someb
+   Judge is untouched. Tests: publish-fix-96-nothing-stale-blocks (5; all 5 fail on the previous code), tape-hot-lane (4, updated to
+   the new law). Green: social-4f-scope, universe, wideeye, publish-fix-94, learning-volatility-watch, tape-resource-law,
+   judge-composition, paper-runtime, coin-dossier.
++- `paper/profile.js` + `config/paper-runtime.json` (PUBLISH-FIX-97, 2026-09-21; not frozen): the tape's I/O lane is turned ON.
++  Artifact, from the deployment's own instruments: boot CPU profile "busy 14078ms idle 45962ms - top: fsync 78% 10979ms"; JUDGE
++  FUNNEL at 01:45 "LOOP 119 stalls over 100 ms (worst 2526 ms, 46161 ms blocked)", "DB tx p50 320 / p95 10892 / max 20346 ms over
++  44 (statements/tx p50 4, bytes/tx p50 0 / max 0 KB)", "pool checkout wait max 213 ms (failures 0)", "journal commit p50 547 /
++  p95 40850 / max 48629 ms", "decision compute max 30914 ms", "top refusals ... PROPOSAL_EXPIRED_10S 2". Four statements carrying
++  ZERO kilobytes took twenty seconds while the pool handed out a connection in one millisecond: the database was not slow, the
++  process could not return to it because it was inside fsync, writing every book update, trade and event synchronously as it
++  arrived (240,017 book updates in eighteen minutes). judge/judge.js gives a hypothesis lock policy.execution.proposalExpiryMs
++  (10 s) to become durable, else NEEDS_DATA / HYPOTHESIS_NOT_DURABLE, and expires the proposal past the same 10 s — so a
++  40-second journal commit makes an entry impossible however good the setup is. Ticket B had already built and tested the
++  write-behind buffer for exactly this (lib/write-behind.js, tape/store.js) and left it opt-in behind SERPENT_TAPE_WRITE_BEHIND;
++  nothing had ever turned it on. The paper profile's tape row now carries `writeBehind: true` and profileEnvironment derives the
++  flag from that row (absent means off — never implied). A flush error never reaches the bite lane; tape/run.js drains it on a
++  clean stop. The 10-second proposal law is NOT relaxed: the fix is the disk, not the deadline, and no policy byte changed.
++  Tests: publish-fix-97-io-lane-on (3; FIX97-1 fails on the previous profile). Green: paper-runtime, write-behind,
++  tape-store-write-behind, tape-startup, social-4f-scope.
+ - `tools/gate-study-process.js` / `tools/gate-study-child.js`: the join runs in a child process every 30 minutes (90 s
+   after boot first); the main thread never reads the ledger; the lesson lands in `data/learning/gate-lessons/lesson.json`
+   (+ `state.json` with the proposal history). `fly.js` composes the reader as the Judge's port.
+diff --git a/paper/profile.js b/paper/profile.js
+index a2b1d35..42f0993 100644
+--- a/paper/profile.js
++++ b/paper/profile.js
+@@ -76,6 +76,14 @@ export function profileEnvironment(profile, { dataDir = null } = {}) {
+     RUMOR2_SOCIAL_FARCASTER_ENABLED: g.social.FARCASTER_OFFICIAL?.desiredState === 'REQUEST' || on(g.social.FARCASTER_OFFICIAL) ? 'true' : 'false',
+     RUMOR2_SOCIAL_CURRENT_ENABLED: g.social.REDDIT_OFFICIAL?.desiredState === 'REQUEST' || on(g.social.REDDIT_OFFICIAL) ? 'true' : 'false',
+     RUMOR2_SOCIAL_REDDIT_ENABLED: g.social.REDDIT_OFFICIAL?.desiredState === 'REQUEST' || on(g.social.REDDIT_OFFICIAL) ? 'true' : 'false',
++    // PUBLISH-FIX-97 (2026-09-21): the tape's I/O lane. The boot CPU profile read "busy 14078ms ... fsync 78% 10979ms" — four
++    // fifths of the process's working time inside synchronous disk flushes, writing every book update, trade and event as it
++    // arrived. The live funnel showed what that costs the bite lane: 119 event-loop stalls over 100 ms (46 s blocked), DB
++    // transactions p95 10.9 s on four statements carrying 0 KB, journal commits p95 40.8 s — against a proposal law that expires
++    // in 10 s, so a hypothesis lock could not land inside its own window. Ticket B built and tested the write-behind buffer for
++    // exactly this and left it opt-in; the paper profile turns it on. A flush error never reaches the bite lane and the shutdown
++    // seam drains it: the evidence is written moments later, never less completely.
++    SERPENT_TAPE_WRITE_BEHIND: g.coreObservation.tape?.writeBehind === true ? 'true' : 'false',
+     WIDEEYE_ENABLED: on(g.coreObservation.wideEye) ? 'true' : 'false', GATEWAY_ENABLED: on(g.infrastructure.gateway) ? 'true' : 'false', RUMINT_ENABLED: on(g.rumorOfficial.rumintLegacy) ? 'true' : 'false',
+     // PUBLISHER observation tier (press/): the profile selects the crypto publisher feeds by id; ON rows are watched, OFF rows
+     // never called. Headline / link only, authority NONE, outside the frozen RUMOR-2 evidence core.
+diff --git a/test/publish-fix-97-io-lane-on.test.js b/test/publish-fix-97-io-lane-on.test.js
+new file mode 100644
+index 0000000..362b64a
+--- /dev/null
++++ b/test/publish-fix-97-io-lane-on.test.js
+@@ -0,0 +1,54 @@
++// PUBLISH-FIX-97 (2026-09-21) — THE BITE LANE STOPS BLOCKING ON THE DISK.
++//
++// The artifact, from the live deployment's own instruments:
++//   boot CPU profile      "CPU PROFILE 60s: busy 14078ms idle 45962ms · top: fsync 78% 10979ms · writeBuffer 4% 577ms"
++//   JUDGE FUNNEL, 01:45   "LOOP 119 stalls over 100 ms (worst 2526 ms, 46161 ms blocked)"
++//                         "DB tx p50 320 / p95 10892 / max 20346 ms over 44 (statements/tx p50 4, bytes/tx p50 0 / max 0 KB)"
++//                         "pool checkout wait p50 0 / p95 1 / max 213 ms (failures 0)"
++//                         "journal commit p50 547 / p95 40850 / max 48629 ms"
++//                         "decision compute p50 2 / p95 2 / max 30914 ms"
++//                         "top refusals ... PROPOSAL_EXPIRED_10S 2"
++// Four statements carrying ZERO kilobytes took twenty seconds, while the pool handed out a connection in one millisecond. The
++// database was not slow; the process could not come back to it — it was inside fsync. Every book update, trade and event was
++// written synchronously as it arrived (240,017 book updates in eighteen minutes). Against judge/judge.js's proposal law —
++// policy.execution.proposalExpiryMs = 10 s for the hypothesis lock to become durable — a 40-second journal commit means the
++// lock cannot land inside its own window, and the decision expires however good the setup was.
++//
++// Ticket B already built and tested the write-behind buffer for exactly this (lib/write-behind.js, tape/store.js) and left it
++// opt-in behind SERPENT_TAPE_WRITE_BEHIND. Nothing had ever turned it on. The paper profile now does.
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import { loadProfile, profileEnvironment } from '../paper/profile.js';
++
++const PROFILE = 'config/paper-runtime.json';
++
++test('FIX97-1: the paper profile turns the tape I/O lane ON, and it is derived from the tape row (not hard-coded)', () => {
++  const profile = loadProfile(PROFILE);
++  assert.equal(profile.groups.coreObservation.tape.writeBehind, true, 'the profile row carries the switch');
++  assert.equal(profileEnvironment(profile).SERPENT_TAPE_WRITE_BEHIND, 'true');
++  // and it follows the row: a profile whose tape row does not ask for it stays OFF (the shipped default before this fix)
++  const off = { ...profile, groups: { ...profile.groups, coreObservation: { ...profile.groups.coreObservation, tape: { ...profile.groups.coreObservation.tape, writeBehind: false } } } };
++  assert.equal(profileEnvironment(off).SERPENT_TAPE_WRITE_BEHIND, 'false');
++  const absent = { ...profile, groups: { ...profile.groups, coreObservation: { ...profile.groups.coreObservation, tape: { desiredState: 'ON' } } } };
++  assert.equal(profileEnvironment(absent).SERPENT_TAPE_WRITE_BEHIND, 'false', 'absent means off — the switch is never implied');
++});
++
++test('FIX97-2: with the lane on, the tape\'s appends leave the calling thread and are drained on a clean stop', async () => {
++  const prev = process.env.SERPENT_TAPE_WRITE_BEHIND;
++  process.env.SERPENT_TAPE_WRITE_BEHIND = 'true';
++  try {
++    const store = await import('../tape/store.js?fix97');
++    const status = store.tapeWriteBehindStatus();
++    assert.equal(status.enabled, true, 'the switch is read from the environment the profile sets');
++    assert.equal(typeof store.flushTapeWrites, 'function');
++    assert.equal(typeof store.stopTapeWrites, 'function', 'the shutdown seam can drain it (tape/run.js calls this on a clean stop)');
++  } finally { if (prev === undefined) delete process.env.SERPENT_TAPE_WRITE_BEHIND; else process.env.SERPENT_TAPE_WRITE_BEHIND = prev; }
++});
++
++test('FIX97-3: the proposal law this protects is unchanged — 10 s is still 10 s, and the fix is the disk, not the deadline', async () => {
++  const { readFileSync } = await import('node:fs');
++  const policy = JSON.parse(readFileSync('config/judge.paper.starting-styles-fee080.json', 'utf8'));
++  assert.equal(policy.execution.proposalExpiryMs, 10_000, 'the deadline is NOT relaxed to paper over a slow disk');
++  assert.equal(policy.execution.maxReceiptToDecisionLagMs, 500);
++  assert.equal(policy.fees.taker.rate, '0.008', 'and the account policy is byte-untouched (a fee change would need a NEW account)');
++});
+-- 
+2.43.0
+
