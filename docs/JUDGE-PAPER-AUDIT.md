@@ -66,6 +66,33 @@ watch/watch.js   6f319a1ee72a2b43346b8d07f906bb3ca31566ca7e3be0180d57f551d8a1afe
 all (49 files)   6016f931e15531e63a2f0d734137f914d9f8c0e2831902e4cc7806333fcd4127
 ```
 
+### 4.37 Recorded change — 2026-09-21 PUBLISH-FIX-100: the stage widens from six to twenty and binds a NEW $500 account, `paper-starting-styles-usd500-fee080-wide20` (frozen core UNCHANGED; no digest moves)
+
+Not a frozen change: `judge/*.js`, `execution/*.js` and `watch/watch.js` are byte-identical to §4.35. What changed is the
+paper POLICY's universe block and, by the account law of §4.19/§4.22/§4.23/§4.36, the account it binds.
+`config/judge.paper.starting-styles-fee080.json` (and its reviewed twin `judge/samples/policy.paper-starting-styles-fee080.json`,
+still byte for byte the same file) now reads `maxCandidates 20` (was 6), `maxHotSet 40` (was 12), `preparationSlots 20`
+(was 6), `policyName` and `account.accountId` `paper-starting-styles-usd500-fee080-wide20`, `initialCapital` still `500`.
+`config/paper-runtime.json` groups.judge.judge.accountId and `config/kraken-fee-snapshot.json` name the same account, so
+`paper/profile.js` derives the matching `JUDGE_ACCOUNT`; the boot creates it ONCE under owner intent
+(`SERPENT_PAPER_INIT_ACCOUNT` = that name), and every earlier account — `paper-starting-styles-usd500-fee080` among them —
+and its journal stay untouched and readable. Nothing else moved: limits, execution controls (including the 10 s
+`proposalExpiryMs`), fees (`0.008` taker, the real Kraken Pro Tier-1 rate of §4.36), evaluation, capital, compounding, the
+six enabled setups and the PAPER authority are unchanged, and `judge/samples/policy.paper-reference.json` is left at
+6/12/6 so the divergence is this account's, never a silent global loosening.
+
+Reason — the owner's directive of 2026-09-21 ("I don't care if I lose that $500 just start with a new $500 ... The answer
+is we don't need six. I don't care if it's written into the policy"), and the measurement behind it. The funnel already
+starts at ~600: the wide eye sweeps 612 USD pairs, the broad collector carries ~500 coins a minute, the volatility watch
+ranks ~90 and offers 20 (PUBLISH-FIX-99), the tape's hot lane carries 20 live order books (PUBLISH-FIX-99 on the
+event-loop headroom measured after PUBLISH-FIX-97: utilisation 88-91% → 56-61%). The Judge then prepared
+`Math.min(preparationSlots, maxCandidates)` = SIX of those twenty, and `execution/feed.js` refused the rest with
+`CANDIDATE_SLOTS_FULL` / `HOT_SET_FULL` — the shape behind the live `FEED_NOT_IN_TAPE_UNIVERSE` refusals. Both numbers had
+to move or the change would have been cosmetic. Fenced by `test/publish-fix-100-twenty-on-the-stage.test.js` (6 tests:
+the effective stage is twenty, the account is new and not a reset, money/risk/authority unmoved, the two policy files
+still byte-identical, every file that names the account names the new one, the reference still at six) and by the
+widened-universe carve-out in `test/paper-e2e-pg.test.js`. Authority unchanged: PAPER_SIMULATION_ONLY, no orders.
+
 ### 4.36 Audited change — 2026-09-20 PUBLISH-FIX-87: the paper fee is the REAL Kraken Pro Tier-1 taker (0.80% a side) for a $500 account; a new account; the fee-tier reader on the July 2026 schedule (frozen core UNCHANGED; no digest moves)
 
 Two independent reviews (and the owner, every day) said the 0.40% reference was wrong for the account he will open. Checked

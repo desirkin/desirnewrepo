@@ -8,7 +8,7 @@
  "asOf": "2026-09-20",
  "verification": "PUBLIC_SCHEDULE_NOT_ACCOUNT",
  "policyFile": "config/judge.paper.starting-styles-fee080.json",
- "accountId": "paper-starting-styles-usd500-fee080",
+ "accountId": "paper-starting-styles-usd500-fee080-wide20",
  "takerRateBound": "0.008",
  "roundTripPct": 1.6,
  "schedule": [
