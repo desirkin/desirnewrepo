@@ -1,0 +1,262 @@
+From 4a1656fcb041bae923c1e37e4372aff3c7d0dfec Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 21 Sep 2026 04:46:57 +0000
+Subject: [PATCH 1/2] PUBLISH-FIX-112: priorLow60 without a decimal parse per
+ comparison
+
+After FIX-111 the next sampled stall on d58a8012 (04:42:04):
+  MAIN THREAD STACK: (anonymous) judge/judge.js:351 <- windowFacts <- fastFacts
+with the minute's top frame still `cmp 13%`. priorLow60 was
+lows60.reduce((a, b) => (M.lt(a, b) ? a : b)) over every best bid of
+the last sixty seconds - thousands of entries on an active book - two
+decimal parses per comparison, up to four times a second per candidate.
+
+minDecimal follows exactly the law medianDecimal already used: doubles
+are sort keys only (a smaller double is exactly smaller), the run of
+equal doubles is resolved with M.lt, and a lexeme failing the fast-path
+guard sends the list down the exact reduce. Same value byte for byte -
+3,000 random lists with ties and over-long lexemes in the fence.
+judge-differential green.
+
+Frozen: judge b8d814731a3a -> 9453d3f20166, all ad323dca8b88 ->
+9af8b8db1c86. Recorded as docs/JUDGE-PAPER-AUDIT.md 4.43.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01RoFoPS22WFW1oUnbWzPayd
+---
+ docs/JUDGE-PAPER-AUDIT.md                    | 16 ++++++++++++--
+ judge/features.js                            | 14 +++++++++++++
+ judge/judge.js                               |  4 ++--
+ test/publish-fix-111-bounded-windows.test.js | 22 ++++++++++++++++++++
+ 4 files changed, 52 insertions(+), 4 deletions(-)
+
+diff --git a/docs/JUDGE-PAPER-AUDIT.md b/docs/JUDGE-PAPER-AUDIT.md
+index 5c72024..1dfd8b2 100644
+--- a/docs/JUDGE-PAPER-AUDIT.md
++++ b/docs/JUDGE-PAPER-AUDIT.md
+@@ -60,12 +60,24 @@ Digest law: `sha256` over the sorted repository-relative file list, each entry a
+ 
+ ```
+ FROZEN_FOR_PAPER
+-judge/*.js       b8d814731a3a460d24b62a4a23c1a46966b91bc1939d4a243f8250b7270150c8
++judge/*.js       9453d3f2016629a2a19d0ebac6c951f3a39889554b9f7ddc3e0012ce4a3cd686
+ execution/*.js   bfcff6846d4dfd157eb84c2a5504298ba55244c09afeb746f33a1f5d1095a9a4
+ watch/watch.js   6f319a1ee72a2b43346b8d07f906bb3ca31566ca7e3be0180d57f551d8a1afe1
+-all (49 files)   ad323dca8b886117a5aefa00e0f830518fdd4fd7624d7f22e59ecb4535c36340
++all (49 files)   9af8b8db1c8636a0cd4a9cfb3870562219e3e7fe4927730a46877c857e4bbe47
+ ```
+ 
++### 4.43 Audited change — 2026-09-21 PUBLISH-FIX-112: `priorLow60` without a decimal parse per comparison (previous judge digest `b8d814731a3a…`; now `9453d3f20166…`; all `ad323dca8b88…` → `9af8b8db1c86…`; execution and watch/watch.js UNCHANGED; 49 files)
++
++`judge/features.js` (new `minDecimal`) and `judge/judge.js` (`windowFacts` uses it). After PUBLISH-FIX-111 the next
++sampled stall on `d58a8012` (04:42:04) read `MAIN THREAD STACK: (anonymous) judge/judge.js:351 <- windowFacts <- fastFacts`
++with the minute's top frame still `cmp 13%`: `priorLow60` was `lows60.reduce((a, b) => (M.lt(a, b) ? a : b))` over every
++best bid recorded in the last sixty seconds — thousands of entries on an active book — two decimal parses per comparison,
++up to four times a second per candidate. `minDecimal` follows exactly the law `medianDecimal` already used: doubles are sort
++keys only (a smaller double is exactly smaller), the run of equal doubles is resolved with `M.lt`, and a lexeme that fails
++the fast-path guard sends the whole list down the exact reduce. Same value, byte for byte — proven on 3,000 random lists
++with ties and over-long lexemes in `test/publish-fix-111-bounded-windows.test.js` (FIX112-1/2, now 7 tests). The
++differential replay is green. Authority unchanged: PAPER_SIMULATION_ONLY.
++
+ ### 4.42 Audited change — 2026-09-21 PUBLISH-FIX-111: the flow windows were the main thread — every scan bounded by the receipt clock, exactly (previous judge digest `9122a83068c6…`; now `b8d814731a3a…`; all `39a03bf6645e…` → `ad323dca8b88…`; execution and watch/watch.js UNCHANGED; 49 files)
+ 
+ `judge/features.js` only. Production `2b2047d0` at 04:19, the sampled minute at 100% busy with twenty candidates on the
+diff --git a/judge/features.js b/judge/features.js
+index 7bfde06..76ec6a6 100644
+--- a/judge/features.js
++++ b/judge/features.js
+@@ -135,6 +135,20 @@ export function bidDepthWithinBps(snapshot, bps) { const f = bookFacts(snapshot)
+ // different exact order). Same value either way; the double is a sort key only.
+ const MEDIAN_FAST_RE = /^-?(0|[1-9]\d*)(\.\d+)?$/;
+ const medianExact = (list) => { const s = [...list].sort((a, b) => M.cmp(a, b)); const mid = Math.floor(s.length / 2); return s.length % 2 ? s[mid] : M.div(M.add(s[mid - 1], s[mid]), '2', 8, 'HALF_UP'); };
++// PUBLISH-FIX-112 (2026-09-21): the EXACT minimum of a list of decimal lexemes, by the same law as medianDecimal below — doubles
++// are sort keys only (monotonic rounding: a smaller double is exactly smaller), and a run of equal doubles is resolved with the
++// exact comparator. windowFacts took `priorLow60` as `lows60.reduce((a, b) => (M.lt(a, b) ? a : b))` over every best bid of the last
++// sixty seconds — thousands of entries on an active book, two decimal parses per comparison, up to four times a second per
++// candidate. Production d58a8012 at 04:42, a 5 s stall: `MAIN THREAD STACK: (anonymous) judge/judge.js:351 <- windowFacts`, and
++// the sampled minute's top frame `cmp 13%`. Same value, byte for byte; a list that fails the fast-path guard takes the exact path.
++export const minDecimal = (list) => {
++  if (!list.length) return null;
++  const n = list.length; const keys = new Float64Array(n);
++  for (let i = 0; i < n; i += 1) { const v = list[i]; if (typeof v !== 'string' || v.length > 20 || !MEDIAN_FAST_RE.test(v)) return list.reduce((a, b) => (M.lt(a, b) ? a : b)); keys[i] = Number(v); }
++  let m = Infinity; for (let i = 0; i < n; i += 1) if (keys[i] < m) m = keys[i];
++  let best = null; for (let i = 0; i < n; i += 1) if (keys[i] === m) { const v = list[i]; if (best === null || M.lt(v, best)) best = v; }
++  return best;
++};
+ export const medianDecimal = (list) => {
+   if (!list.length) return null;
+   const n = list.length; const keys = new Float64Array(n);
+diff --git a/judge/judge.js b/judge/judge.js
+index 7e018f5..c91fc5d 100644
+--- a/judge/judge.js
++++ b/judge/judge.js
+@@ -6,7 +6,7 @@
+ // transaction with a revision recheck; the dispatcher then sends through the outbox. Entry permission is the intersection
+ // of authenticated controls, account mode / release, risk and health. NO_TRADE is a successful decision.
+ import * as M from '../execution/money.js';
+-import { indicatorBlock, createFlowTracker, createFeatureCache, bookFacts, bidDepthWithinBps, medianDecimal, validateBarBlock, FEATURE_VERSION, FI_MIN_TRADES } from './features.js';
++import { indicatorBlock, createFlowTracker, createFeatureCache, bookFacts, bidDepthWithinBps, medianDecimal, minDecimal, validateBarBlock, FEATURE_VERSION, FI_MIN_TRADES } from './features.js';
+ import { SETUPS, SETUP_INPUT_MODES, REFERENCE, freezeReferences, evaluateSetup, evaluateStyleExecutionGate, createConfirmation, createEpisodeTracker, hypothesisDigest, setupDefinition, STRATEGY_VERSION, LEARNABLE_GATES, learnedOverrides } from './setups.js'; // PUBLISH-FIX-82: the learnable gate lines
+ import { evaluateEntry, sizeSearch, liquidationValue, COST_MODEL_VERSION } from './cost.js';
+ import { admitCandidate, riskBudgetFor, rankCandidates, clusterIdOf } from './risk.js';
+@@ -349,7 +349,7 @@ export function createJudge({ accountId, policy, policyDigest, dispatcher, feed,
+   function windowFacts(c, decisionTs, cov) {
+     const cached = c.windowFacts; if (cached && decisionTs - cached.ts >= 0 && decisionTs - cached.ts < FAST_WINDOW_MS && cached.epoch === (cov?.epoch ?? null)) return cached.value;
+     const prior = c.books.filter((b) => b.ts >= decisionTs - 75_000 && b.ts < decisionTs - 15_000); const priorDepths = prior.map((b) => b.depth).filter(Boolean); const priorMids = prior.map((b) => b.mid); const lows60 = c.books.filter((b) => b.ts >= decisionTs - 60_000).map((b) => b.bestBid);
+-    const value = { fi15: c.flow.fi(decisionTs - 15_000, decisionTs, FI_FLOOR_15), fi60: c.flow.fi(decisionTs - 60_000, decisionTs, FI_FLOOR_60), /* PUBLISH-FIX-83 item 8: a trade-count floor, window widened before it binds */ rv60: c.flow.rv60(decisionTs, cov), vwap60: c.flow.vwap(decisionTs - 60_000, decisionTs), priorFi: c.flow.fi(decisionTs - 75_000, decisionTs - 15_000), reclaimFi: c.flow.fi(decisionTs - 15_000, decisionTs), priorMidChange: priorMids.length >= 2 ? M.sub(priorMids[priorMids.length - 1], priorMids[0]) : null, priorMedianDepth: priorDepths.length ? medianDecimal(priorDepths) : null, priorDepthSamples: priorDepths.length, priorLow60: lows60.length ? lows60.reduce((a, b) => (M.lt(a, b) ? a : b)) : null };
++    const value = { fi15: c.flow.fi(decisionTs - 15_000, decisionTs, FI_FLOOR_15), fi60: c.flow.fi(decisionTs - 60_000, decisionTs, FI_FLOOR_60), /* PUBLISH-FIX-83 item 8: a trade-count floor, window widened before it binds */ rv60: c.flow.rv60(decisionTs, cov), vwap60: c.flow.vwap(decisionTs - 60_000, decisionTs), priorFi: c.flow.fi(decisionTs - 75_000, decisionTs - 15_000), reclaimFi: c.flow.fi(decisionTs - 15_000, decisionTs), priorMidChange: priorMids.length >= 2 ? M.sub(priorMids[priorMids.length - 1], priorMids[0]) : null, priorMedianDepth: priorDepths.length ? medianDecimal(priorDepths) : null, priorDepthSamples: priorDepths.length, priorLow60: lows60.length ? minDecimal(lows60) : null }; // PUBLISH-FIX-112: exact minimum without a decimal parse per comparison
+     c.windowFacts = { ts: decisionTs, epoch: cov?.epoch ?? null, value }; return value;
+   }
+   function fastFacts(c, snap, decisionTs) { const f = bookFacts(snap); const cov = feed ? feed.coverage(c.symbol, decisionTs) : { continuous: true, startTs: c.admittedTs, endTs: decisionTs }; const health = feed ? feed.health(c.symbol, decisionTs) : { bookAgeMs: decisionTs - snap.receiptTs }; const depthNow = bidDepthWithinBps(snap, 10); const w = windowFacts(c, decisionTs, cov);
+diff --git a/test/publish-fix-111-bounded-windows.test.js b/test/publish-fix-111-bounded-windows.test.js
+index 90d95cb..abb2178 100644
+--- a/test/publish-fix-111-bounded-windows.test.js
++++ b/test/publish-fix-111-bounded-windows.test.js
+@@ -16,6 +16,7 @@
+ // search on receiptTs skips only prints that could never be in the window. The tracker turns the hint off for good the moment a
+ // print arrives out of receipt order. A plain array without the hint is scanned from the start exactly as before.
+ import test from 'node:test';
++import { readFileSync } from 'node:fs';
+ import assert from 'node:assert/strict';
+ import { createFlowTracker, flowImbalance, vwap, windowNotional, relativeVolume60 } from '../judge/features.js';
+ 
+@@ -85,3 +86,24 @@ test('FIX111-5: it is actually faster — a 15-second window over 25 minutes of
+   const fast = time(() => flowImbalance(trades, D - 15_000, D, { asOfTs: D, feedEpoch: 3, sortedByReceipt: true }));
+   assert.ok(fast * 4 < slow, `bounded ${fast.toFixed(1)}ms vs full ${slow.toFixed(1)}ms for 20 calls — expected at least 4x`);
+ });
++
++// ---- PUBLISH-FIX-112: the exact minimum for priorLow60 (same file, same night, same law as medianDecimal) ----------------------
++test('FIX112-1: minDecimal equals the exact decimal reduce on thousands of random lists, including ties and long lexemes', async () => {
++  const { minDecimal } = await import('../judge/features.js');
++  const M = await import('../execution/money.js');
++  let x = 42; const rnd = () => { x = (x * 1103515245 + 12345) & 0x7fffffff; return x / 0x7fffffff; };
++  for (let trial = 0; trial < 3000; trial += 1) {
++    const n = 1 + Math.floor(rnd() * 300); const list = [];
++    for (let i = 0; i < n; i += 1) { const ip = Math.floor(rnd() * 1000); const fp = Math.floor(rnd() * 1e8); list.push(rnd() < 0.3 ? String(ip) : `${ip}.${String(fp).padStart(8, '0').replace(/0+$/, '') || '0'}`); }
++    if (rnd() < 0.2) list.push(list[0]);
++    if (rnd() < 0.05) list.push('123456789012.123456789'); // longer than the fast-path guard -> exact path
++    assert.equal(minDecimal(list), list.reduce((a, b) => (M.lt(a, b) ? a : b)), `list ${trial}`);
++  }
++  assert.equal(minDecimal([]), null);
++});
++
++test('FIX112-2: windowFacts uses it for priorLow60 — the decimal-parse-per-comparison reduce is gone from the hot path', () => {
++  const src = readFileSync('judge/judge.js', 'utf8');
++  assert.match(src, /priorLow60: lows60\.length \? minDecimal\(lows60\) : null/);
++  assert.equal(src.includes('lows60.reduce((a, b) => (M.lt(a, b) ? a : b))'), false);
++});
+-- 
+2.43.0
+
+
+From ad5f10a205290ff37cfc3c4077ee914f4b0abe96 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 21 Sep 2026 04:48:50 +0000
+Subject: [PATCH 2/2] PUBLISH-FIX-113: fromNumberLexeme memoised - thousands of
+ book levels a second
+
+execution/feed.js canonicalises EVERY price and quantity on every book
+level and every print through fromNumberLexeme. The sampled minute after
+FIX-111 on d58a8012: fromNumberLexeme 7% . parseLexemes 3% . normalize 3%
+of a saturated main thread.
+
+The function is pure - the same lexeme always canonicalises to the same
+string - so it now carries a bounded memo exactly like parseDecimal's
+(65,536 entries, cleared when full). A hit returns the byte-identical
+string the two regexes, BigInt, format and parse would have produced; a
+malformed lexeme throws before the store and is never remembered.
+Fenced (5,000 random lexemes, hit == miss). judge-differential green.
+
+Frozen: execution bfcff6846d4d -> f6421a32ef67, all 9af8b8db1c86 ->
+57e646b7dfb7. Recorded as docs/JUDGE-PAPER-AUDIT.md 4.44.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01RoFoPS22WFW1oUnbWzPayd
+---
+ docs/JUDGE-PAPER-AUDIT.md                    | 15 +++++++++++++--
+ execution/money.js                           | 14 ++++++++++++++
+ test/publish-fix-111-bounded-windows.test.js | 16 ++++++++++++++++
+ 3 files changed, 43 insertions(+), 2 deletions(-)
+
+diff --git a/docs/JUDGE-PAPER-AUDIT.md b/docs/JUDGE-PAPER-AUDIT.md
+index 1dfd8b2..3ba95b9 100644
+--- a/docs/JUDGE-PAPER-AUDIT.md
++++ b/docs/JUDGE-PAPER-AUDIT.md
+@@ -61,11 +61,22 @@ Digest law: `sha256` over the sorted repository-relative file list, each entry a
+ ```
+ FROZEN_FOR_PAPER
+ judge/*.js       9453d3f2016629a2a19d0ebac6c951f3a39889554b9f7ddc3e0012ce4a3cd686
+-execution/*.js   bfcff6846d4dfd157eb84c2a5504298ba55244c09afeb746f33a1f5d1095a9a4
++execution/*.js   f6421a32ef67c47a986541bed21aa3a6d5c3cce5e31dde3f7f7973a2788de025
+ watch/watch.js   6f319a1ee72a2b43346b8d07f906bb3ca31566ca7e3be0180d57f551d8a1afe1
+-all (49 files)   9af8b8db1c8636a0cd4a9cfb3870562219e3e7fe4927730a46877c857e4bbe47
++all (49 files)   57e646b7dfb774454cbb216f901cf59203dcb98cabfa0a23d5a7bf792dbe6b59
+ ```
+ 
++### 4.44 Audited change — 2026-09-21 PUBLISH-FIX-113: `fromNumberLexeme` memoised (previous execution digest `bfcff6846d4d…`; now `f6421a32ef67…`; all `9af8b8db1c86…` → `57e646b7dfb7…`; judge and watch/watch.js UNCHANGED; 49 files)
++
++`execution/money.js` only. `execution/feed.js` canonicalises EVERY price and quantity on every book level and every print
++the venue sends through `fromNumberLexeme` — thousands a second with twenty live books — and the sampled minute after
++PUBLISH-FIX-111 on `d58a8012` read `fromNumberLexeme 7% · parseLexemes 3% · normalize 3%` of a saturated main thread. The
++function is pure: the same lexeme always canonicalises to the same string. It now carries a bounded memo exactly like
++`parseDecimal`'s (65,536 entries, cleared when full, never growing without bound); a hit returns the byte-identical string
++the two regexes, BigInt construction, format and parse would have produced, and a malformed lexeme throws before the store
++and is never remembered. Proven in `test/publish-fix-111-bounded-windows.test.js` FIX113-1 (5,000 random lexemes, hit ==
++miss, malformed throws on every call). The differential replay is green. Authority unchanged: PAPER_SIMULATION_ONLY.
++
+ ### 4.43 Audited change — 2026-09-21 PUBLISH-FIX-112: `priorLow60` without a decimal parse per comparison (previous judge digest `b8d814731a3a…`; now `9453d3f20166…`; all `ad323dca8b88…` → `9af8b8db1c86…`; execution and watch/watch.js UNCHANGED; 49 files)
+ 
+ `judge/features.js` (new `minDecimal`) and `judge/judge.js` (`windowFacts` uses it). After PUBLISH-FIX-111 the next
+diff --git a/execution/money.js b/execution/money.js
+index 4727168..57013c4 100644
+--- a/execution/money.js
++++ b/execution/money.js
+@@ -109,7 +109,21 @@ export const isMultipleOf = (value, step) => { const [x, y] = align(D(value), D(
+ export const scaleOf = (value) => D(value).scale;
+ // ---- conversions ---------------------------------------------------------------------------------------------------------
+ // an exact JSON numeric source token (the reviver's context.source) -> canonical decimal; exponent forms are expanded exactly
++// PUBLISH-FIX-113 (2026-09-21): a bounded memo, exactly like parseDecimal's above. fromNumberLexeme is pure — the same lexeme
++// always canonicalises to the same string — and execution/feed.js calls it for EVERY price and quantity on every book level
++// and every print the venue sends (thousands a second with twenty live books). Production d58a8012, the sampled minute after
++// PUBLISH-FIX-111: `fromNumberLexeme 7% · parseLexemes 3% · normalize 3%` of a saturated main thread. Price and quantity
++// lexemes repeat heavily (a coin trades at a handful of levels for minutes at a time), so a hit skips two regexes, a BigInt
++// construction, a format and a parse for a string that is byte-identical to what they would produce. A malformed lexeme is
++// never memoised (it throws before the store), and the memo is cleared when full rather than growing without bound.
++const LEX_MEMO_MAX = 65_536; const lexMemo = new Map();
+ export function fromNumberLexeme(lexeme) {
++  if (typeof lexeme === 'string') { const hit = lexMemo.get(lexeme); if (hit !== undefined) return hit; }
++  const out = fromNumberLexemeUncached(lexeme);
++  if (lexMemo.size >= LEX_MEMO_MAX) lexMemo.clear();
++  lexMemo.set(lexeme, out); return out;
++}
++function fromNumberLexemeUncached(lexeme) {
+   if (typeof lexeme !== 'string' || !/^-?(0|[1-9]\d*)(\.\d+)?([eE][-+]?\d+)?$/.test(lexeme)) fail(`numeric lexeme malformed: ${String(lexeme).slice(0, 40)}`);
+   const m = /^(-?)(\d+)(?:\.(\d+))?(?:[eE]([-+]?\d+))?$/.exec(lexeme); const sign = m[1]; const ip = m[2]; const fp = m[3] ?? ''; const exp = Number(m[4] ?? '0');
+   const digits = ip + fp; let scale = fp.length - exp;
+diff --git a/test/publish-fix-111-bounded-windows.test.js b/test/publish-fix-111-bounded-windows.test.js
+index abb2178..09498e9 100644
+--- a/test/publish-fix-111-bounded-windows.test.js
++++ b/test/publish-fix-111-bounded-windows.test.js
+@@ -107,3 +107,19 @@ test('FIX112-2: windowFacts uses it for priorLow60 — the decimal-parse-per-com
+   assert.match(src, /priorLow60: lows60\.length \? minDecimal\(lows60\) : null/);
+   assert.equal(src.includes('lows60.reduce((a, b) => (M.lt(a, b) ? a : b))'), false);
+ });
++
++// ---- PUBLISH-FIX-113: fromNumberLexeme memo (execution/money.js) — the same night, the next frame on the list --------------------
++test('FIX113-1: fromNumberLexeme is memoised exactly — same output, malformed input still throws and is never remembered', async () => {
++  const M = await import('../execution/money.js');
++  let x = 99; const rnd = () => { x = (x * 1103515245 + 12345) & 0x7fffffff; return x / 0x7fffffff; };
++  const lexemes = [];
++  for (let i = 0; i < 5000; i += 1) { const ip = Math.floor(rnd() * 100000); const fp = Math.floor(rnd() * 1e9); lexemes.push(rnd() < 0.2 ? `${ip}` : rnd() < 0.1 ? `${ip}.${fp}e-${Math.floor(rnd() * 6)}` : `${ip}.${String(fp).padStart(9, '0')}`); }
++  const first = lexemes.map((l) => M.fromNumberLexeme(l));
++  const second = lexemes.map((l) => M.fromNumberLexeme(l)); // every one a memo hit now
++  assert.deepEqual(second, first, 'a hit is byte-identical to a miss');
++  for (const l of lexemes.slice(0, 200)) assert.equal(M.parseDecimal(M.fromNumberLexeme(l)) !== undefined, true, 'still a valid decimal');
++  for (let k = 0; k < 2; k += 1) { let threw = false; try { M.fromNumberLexeme('12.3.4'); } catch { threw = true; } assert.equal(threw, true, `malformed throws on call ${k + 1} — never memoised`); }
++  const src = readFileSync('execution/money.js', 'utf8');
++  assert.match(src, /const LEX_MEMO_MAX = 65_536; const lexMemo = new Map\(\);/);
++  assert.match(src, /if \(lexMemo\.size >= LEX_MEMO_MAX\) lexMemo\.clear\(\);/, 'bounded, never unbounded growth');
++});
+-- 
+2.43.0
+
