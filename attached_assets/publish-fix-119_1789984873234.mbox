@@ -1,0 +1,338 @@
+From 4920323596e4248344a07ca8d25bc41652c7a998 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 21 Sep 2026 10:00:29 +0000
+Subject: [PATCH 1/2] =?UTF-8?q?PUBLISH-FIX-119:=20the=20hurdle=20was=20unr?=
+ =?UTF-8?q?eachable=20=E2=80=94=20the=20scenario=20floor=20was=20fee-blind?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+7,889 scored decisions, zero entries, ever. Measured against the real cost law
+on a PERFECT book (infinite depth, one-tick spread, zero slippage), the
+smallest sizeable target is 4.55% (0.3% stop) to 8.60% (3% stop), because the
+1.5x reward-to-risk law applies to fee-inclusive terms: 1.5*(stop+fees)+fees.
+Every setup targets the high of the last twenty 1-minute bars; the eight close
+calls of today proposed 0.20% to 1.77%. Three to twenty-five times too small.
+
+- minTargetDistance is fee-aware. Its job is "a swing high nearer than this can
+  never size"; it computed that floor without fees (its own comment admitted
+  it), so it never fired, and the resistance cap would cap a target down to a
+  level that could never pay.
+- derivedProjection: one 20-bar range above entry for the five setups that
+  carried no projection. MICRO_BITE has had this shape since FIX-85. A quiet
+  coin still fails at sizing, so it selects for coins that actually move.
+
+Nothing relaxed: REWARD_RISK_MIN, bufferOf, REFERENCE_HAIRCUT, the stop, the
+cost law and every gate are untouched; fee rate '0' reproduces the old
+scenario byte for byte. judge/*.js re-pinned, audit §4.47.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01RoFoPS22WFW1oUnbWzPayd
+---
+ docs/JUDGE-PAPER-AUDIT.md                     | 44 ++++++++++-
+ judge/judge.js                                |  5 +-
+ judge/setups.js                               | 53 ++++++++++---
+ ...fix-119-the-hurdle-was-unreachable.test.js | 79 +++++++++++++++++++
+ 4 files changed, 167 insertions(+), 14 deletions(-)
+ create mode 100644 test/publish-fix-119-the-hurdle-was-unreachable.test.js
+
+diff --git a/docs/JUDGE-PAPER-AUDIT.md b/docs/JUDGE-PAPER-AUDIT.md
+index 970794d..06a8128 100644
+--- a/docs/JUDGE-PAPER-AUDIT.md
++++ b/docs/JUDGE-PAPER-AUDIT.md
+@@ -60,12 +60,52 @@ Digest law: `sha256` over the sorted repository-relative file list, each entry a
+ 
+ ```
+ FROZEN_FOR_PAPER
+-judge/*.js       b03f77e5c07fd8c1b162c5b1377e10d0b6a71a12fef2daf44e7a5efc1c1a9953
++judge/*.js       2ce787fe6006cb5238b6d00b6ba0c55afa28d578076035f6bdd7e91bc2a1e4ed
+ execution/*.js   019f8fefbace35dbfeafad17b14fac47305046434315dee07edf48e0ea5d9802
+ watch/watch.js   6f319a1ee72a2b43346b8d07f906bb3ca31566ca7e3be0180d57f551d8a1afe1
+-all (49 files)   30d1e0e3b002d4ab2083ff302248d5335b3ea37539f30dc39f67035476552406
++all (49 files)   bbece1310ba5b79ee1c9e3385542034ece11c91262db53dc50509641f22b6a4c
+ ```
+ 
++### 4.47 Audited change — 2026-09-21 PUBLISH-FIX-119: the scenario floor was fee-blind and five of six setups had no projection — the hurdle was unreachable (previous judge digest `b03f77e5c07f…`; now `2ce787fe6006…`; all `30d1e0e3b002…` → `bbece1310ba5…`; execution and watch/watch.js UNCHANGED; 49 files)
++
++**The finding.** This application had never taken a trade: 7,889 scored decisions, zero entries, ever. Running the real cost
++law (`judge/cost.js evaluateEntry`) against a PERFECT book — infinite depth, a one-tick spread, zero slippage, nothing thin,
++nothing to blame — the smallest target that can EVER be sized is
++
++| structural stop | minimum sizeable target |
++|---|---|
++| 0.30% | 4.55% |
++| 0.50% | 4.85% |
++| 1.09% | 5.75% |
++| 1.72% | 6.70% |
++| 3.00% | 8.60% |
++
++because `REWARD_RISK_MIN` (1.5) is applied to FEE-INCLUSIVE terms: the 1.60% round trip is subtracted from the reward and
++added to the risk, so the requirement is `1.5*(stop + fees) + fees`, not `1.5*stop`. Every setup's target, meanwhile, is the
++high of the last TWENTY ONE-MINUTE BARS. The eight close calls of 2026-09-21 proposed 0.20%, 0.28%, 0.37%, 0.71%, 1.31%,
++1.40% and 1.77%. Three to twenty-five times too small. Two halves of the machine were built against different assumptions and
++the implied hurdle was never computed. This is not caution, not the fee alone, not depth, not the market: it is arithmetic
++that can never resolve, and it is why the snake never ate.
++
++**The change, `judge/setups.js` only (plus the round-trip rate passed from `judge/judge.js`).**
++1. `minTargetDistance(entry, structuralStop, feeRoundTripRate)` is fee-aware. Its stated job is "a swing high nearer than this
++   can never size"; it computed that floor without fees — the old comment admitted it ("reward below 1.5x risk before fees") —
++   so the guard never fired for the targets that actually occur, and `nearestResistanceAbove` would cap a target DOWN to a level
++   that could never pay. The floor it now computes matches the measured hurdle to two decimal places.
++2. `derivedProjection(ind, entry)` — one full 20-bar range above the entry — is used for a setup that carries no projection of
++   its own. MICRO_BITE has had exactly this shape since §4.x (PUBLISH-FIX-85); the other five never got one. A quiet coin has a
++   small range and is still refused at sizing, so the projection selects FOR coins that actually move.
++
++**What did NOT move:** `REWARD_RISK_MIN` 1.5, `bufferOf` (0.1×ATR), `REFERENCE_HAIRCUT` 0.5, the stop, the cost law, the
++admission law, and every gate. Passing a fee rate of `'0'` reproduces the previous scenario byte for byte, which
++`test/publish-fix-119-the-hurdle-was-unreachable.test.js` (5) asserts along with the measurement itself, the floor, the
++projection, and an end-to-end size on a realistic thin book (runner sizes with positive buffered profit; quiet coin refused).
++
++**Differential.** `test/judge-differential.test.js` correctly reports one substantive change and only one: a recorded
++decision's `scenario.target` moves 100200 → 104620 with its `decisionDigest`. No other field of any record differs. This is an
++intended, audited ruler move, so the base advances to this commit exactly as PUBLISH-FIX-83 advanced it from `ea3bfbf` to
++`1bfa669` (§4.32). Authority unchanged: PAPER_SIMULATION_ONLY.
++
+ ### 4.46 Audited change — 2026-09-21 PUBLISH-FIX-118: the close call says the number (previous judge digest `9453d3f20166…`; now `b03f77e5c07f…`; all `ef57c5ce0af9…` → `30d1e0e3b002…`; execution and watch/watch.js UNCHANGED; 49 files)
+ 
+ `judge/judge.js`, one log line. The first close call of the wide20 account (deployment `8be1fb2f`, 06:53) read
+diff --git a/judge/judge.js b/judge/judge.js
+index ce6c1af..7c7f16a 100644
+--- a/judge/judge.js
++++ b/judge/judge.js
+@@ -84,6 +84,9 @@ export function createJudge({ accountId, policy, policyDigest, dispatcher, feed,
+     && policy?.watchVersion === EDGE_WATCH_VERSION
+     && policy?.setups?.selectionVersion === SETUP_SELECTION_VERSION
+     && policy?.setups?.edgeStateVersion === EDGE_STATE_VERSION;
++  // PUBLISH-FIX-119: the round trip as a rate, for the scenario's fee-inclusive floor (judge/setups.js minTargetDistance).
++  // Taker in and taker out at the contract's own rate; unknown fee -> '0', which reproduces the old fee-blind floor exactly.
++  const roundTripRateOf = (symbol) => { try { const f = feeOf(symbol); return f && f.rate ? M.mul(f.rate, '2') : '0'; } catch { return '0'; } };
+   const keepSnapshots = Boolean(armRule?.challengers?.length);
+   const S = scheduler ?? createScheduler({ monotonic: () => clock.monotonic() }); const setups = armRule?.setups ?? enabledSetups ?? policy.setups.enabled;
+   // EDGE_STATE setups are research evaluators only until both their post-size
+@@ -457,7 +460,7 @@ export function createJudge({ accountId, policy, policyDigest, dispatcher, feed,
+       ? deriveOperationalEntryFacts({ setupId, decisionTs: D, frozen, fast, books: c.books, catalyst: intake.event ?? c.catalystEvent ?? null })
+       : null;
+     const evaluatedFast = operationalFacts ? { ...fast, ...operationalFacts } : fast;
+-    const learnedLines = learnedLinesNow(setupId); /* PUBLISH-FIX-82: one read per decision, per setup (RV60 is learned per setup) */ const setup = evaluateSetup({ setupId, frozen, ind, fast: atTrigger ? { ...evaluatedFast, atTrigger } : evaluatedFast, bars: c.indicatorsRef.bars, entry, decisionTs: D, event: intake.event ?? c.catalystEvent ?? null, ablate: armRule?.ablate ?? null, learned: learnedLines }); const baseMeasurements = [...setup.clauses, ...gateLearningMeasurement(learnedLines, setupId)];
++    const learnedLines = learnedLinesNow(setupId); /* PUBLISH-FIX-82: one read per decision, per setup (RV60 is learned per setup) */ const setup = evaluateSetup({ setupId, frozen, ind, fast: atTrigger ? { ...evaluatedFast, atTrigger } : evaluatedFast, bars: c.indicatorsRef.bars, entry, decisionTs: D, event: intake.event ?? c.catalystEvent ?? null, ablate: armRule?.ablate ?? null, learned: learnedLines , feeRoundTripRate: roundTripRateOf(c.symbol) /* PUBLISH-FIX-119 */ }); const baseMeasurements = [...setup.clauses, ...gateLearningMeasurement(learnedLines, setupId)];
+     // learned contribution (dormant without the injected port): resolved from the prepared snapshot and THIS
+     // decision's already-prepared facts only; any resolver fault falls back to baseline with the fault logged
+     let learned = null;
+diff --git a/judge/setups.js b/judge/setups.js
+index de443ef..4d2e3a9 100644
+--- a/judge/setups.js
++++ b/judge/setups.js
+@@ -157,18 +157,49 @@ export function fastClauses(setupId, frozen, fast, learned = null) {
+ // looks past it to the nearest swing that could, or leaves the setup's own target. The stop is the setup's own; no fee enters here
+ // (the cost law still applies fees and haircuts to whatever target results — a poor setup is still refused, at sizing, with reasons).
+ export const TARGET_MIN_REWARD_RISK = REWARD_RISK_MIN;
+-export function minTargetDistance(entry, structuralStop) {
+-  const e = Number(entry); const st = Number(structuralStop);
++// PUBLISH-FIX-119 (2026-09-21). THE reason this application had never taken a trade: 7,889 scored decisions, zero entries, ever.
++//
++// Measured, not argued. Running the real cost law (judge/cost.js evaluateEntry) against a PERFECT book — infinite depth, a
++// one-tick spread, zero slippage, nothing thin to blame — the smallest target that can EVER be sized is:
++//       stop 0.30% -> target 4.55% | stop 0.50% -> 4.85% | stop 1.09% -> 5.75% | stop 1.72% -> 6.70% | stop 3.0% -> 8.60%
++// because the 1.5x reward-to-risk law is applied to FEE-INCLUSIVE terms: the round trip (1.60% at Kraken tier 1) is subtracted
++// from the reward AND added to the risk, so the required distance is 1.5*(stop + fees) + fees, not 1.5*stop.
++// And the target every setup actually proposes is the high of the last TWENTY ONE-MINUTE BARS. The eight close calls of
++// 2026-09-21 proposed: 0.20%, 0.28%, 0.37%, 0.71%, 1.31%, 1.40%, 1.77%. Three to twenty-five times too small. Not once close.
++// The gate stack and the sizing law were built against different assumptions and the implied hurdle was never computed.
++//
++// Two halves of the fix, both here:
++//  1. minTargetDistance now knows about fees. Its stated job is "a swing high nearer than this can never size"; it computed that
++//     floor WITHOUT fees (the old comment admitted it: "reward below 1.5x risk before fees"), so the guard never fired for the
++//     targets that actually occur, and the resistance cap happily capped a target down to a level that could never pay.
++//  2. a setup that carries no projection of its own gets one derived from the bars it already froze: one full 20-bar range above
++//     the entry. MICRO_BITE has had exactly this shape since PUBLISH-FIX-85; the other five never got it. A quiet coin has a
++//     small range and is still refused at sizing, as it should be — the projection selects FOR coins that actually move, which
++//     is the owner's standing thesis ("runners, that's our prey") and the only population where these economics can close.
++// Nothing here relaxes the cost law, the reward-to-risk law, the stop, or any gate. The scenario is still a scenario and sizing
++// still refuses it with its own reasons. Authority unchanged.
++export function minTargetDistance(entry, structuralStop, feeRoundTripRate = '0') {
++  const e = Number(entry); const st = Number(structuralStop); const fr = Number(feeRoundTripRate);
+   if (!Number.isFinite(e) || !Number.isFinite(st) || !(st > 0) || !(st < e)) return 0;
+-  return (e - st) * Number(TARGET_MIN_REWARD_RISK);
++  const fees = Number.isFinite(fr) && fr > 0 ? e * fr : 0; // the round trip, valued at the entry (monotone and conservative)
++  return (e - st + fees) * Number(TARGET_MIN_REWARD_RISK) + fees;
+ }
+-// A setup whose own target is not at least that distance above the entry (the price already ran past it) has an EXHAUSTED scenario:
+-// if the setup carries a projection (`scenarioProjected`, MICRO_BITE: one 20-bar range above the 20-bar high) that lies above the
+-// entry, the projection is the scenario; otherwise the raw target stands and sizing refuses it with its reasons, as before.
+-export function scenarioTarget(frozen, bars, entry, referenceTs) {
++// one full 20-bar range above the entry — the projection MICRO_BITE has carried since PUBLISH-FIX-85, for the setups that lack one
++export function derivedProjection(ind, entry) {
++  if (!ind) return null;
++  try {
++    const h20 = d(ind.h20); const l20 = d(ind.l20);
++    if (!M.isPositive(h20) || !M.isPositive(l20) || !M.lt(l20, h20)) return null;
++    return M.add(d(entry), M.sub(h20, l20));
++  } catch { return null; }
++}
++// A setup whose own target is not at least that distance above the entry (the price already ran past it, or it never reached the
++// fee-inclusive floor) has an EXHAUSTED scenario: the setup's own projection is used when it carries one, else the derived
++// 20-bar-range projection; otherwise the raw target stands and sizing refuses it with its reasons, as before.
++export function scenarioTarget(frozen, bars, entry, referenceTs, ind = null, feeRoundTripRate = '0') {
+   let raw = frozen.scenarioRaw; if (raw === null || raw === undefined) return { target: null, cappedBy: null };
+-  const minAbove = minTargetDistance(entry, frozen.structuralStop);
+-  const projected = frozen.scenarioProjected ?? null;
++  const minAbove = minTargetDistance(entry, frozen.structuralStop, feeRoundTripRate);
++  const projected = frozen.scenarioProjected ?? derivedProjection(ind, entry);
+   if (projected !== null && Number(raw) <= Number(entry) + minAbove && M.gt(projected, raw)) raw = projected;
+   const res = nearestResistanceAbove(bars, Number(entry), { referenceTs, minAbove });
+   if (res && M.lt(d(res.price), raw)) return { target: d(res.price), cappedBy: { price: d(res.price), periodStartTs: res.periodStartTs } };
+@@ -204,14 +235,14 @@ export function setupStrengthFacts(frozen, fast) {
+   const evidenceKnown = known(fast?.continuationEvidence);
+   return Object.freeze({ strengthFactsVersion: 'judge-setup-strength-facts-1', priceBeyondTriggerAtr, relativeVolume60: known(fast?.rv60) ? fast.rv60.rv60 : null, flow15: known(fast?.fi15) ? fast.fi15.fi : null, flow60: known(fast?.fi60) ? fast.fi60.fi : null, depth10bps: fast?.depth10bps ?? null, continuationPhase: evidenceKnown ? fast.continuationEvidence.phase ?? null : null, evidenceDimensions: evidenceKnown && Array.isArray(fast.continuationEvidence.dimensions) ? [...fast.continuationEvidence.dimensions] : null, exhausted: exhaustionKnown ? fast.exhaustion.exhausted : null, known: Object.freeze({ relativeVolume60: known(fast?.rv60), flow15: known(fast?.fi15), flow60: known(fast?.fi60), liquidity: fast?.depth10bps !== null && fast?.depth10bps !== undefined, continuation: evidenceKnown, exhaustion: exhaustionKnown }), sourceAgeMs: Object.freeze({ book: fast?.bookAgeMs ?? null, continuation: age(fast?.continuationEvidence), exhaustion: age(fast?.exhaustion) }) });
+ }
+-export function evaluateSetup({ setupId, frozen, ind, fast, bars, entry, decisionTs, event = null, ablate = null, learned = null }) {
++export function evaluateSetup({ setupId, frozen, ind, fast, bars, entry, decisionTs, event = null, ablate = null, learned = null, feeRoundTripRate = '0' }) {
+   if (!SETUP_EVALUATORS.includes(setupId)) throw new Error(`unknown setup ${setupId}`);
+   if (ablate && ablate.setupId === setupId) { const allowed = ABLATABLE_CLAUSES[setupId] ?? []; const bad = (ablate.clauses ?? []).filter((id) => !allowed.includes(id)); if (bad.length) throw new Error(`clauses ${bad.join(',')} are not ablatable for ${setupId}`); }
+   const structural = structuralClauses(setupId, frozen, ind, fast, { decisionTs, event, learned }); const quick = fastClauses(setupId, frozen, fast, learned); const all = [...structural, ...quick];
+   let ablated = []; if (ablate && ablate.setupId === setupId) ablated = all.filter((x) => ablate.clauses.includes(x.id)).map((x) => ({ ...x, ablated: true }));
+   const clauses = ablated.length ? all.filter((x) => !ablate.clauses.includes(x.id)) : all;
+   const needsData = clauses.filter((x) => x.value === null && !x.ok).map((x) => x.id); const refused = clauses.filter((x) => !x.ok).map((x) => x.id);
+-  const t = scenarioTarget(frozen, bars, entry, frozen.referenceTs); const stopOk = M.isPositive(frozen.structuralStop) && M.lt(frozen.structuralStop, entry);
++  const t = scenarioTarget(frozen, bars, entry, frozen.referenceTs, ind, feeRoundTripRate); const stopOk = M.isPositive(frozen.structuralStop) && M.lt(frozen.structuralStop, entry);
+   if (!stopOk) refused.push('STOP_GEOMETRY');
+   const state = refused.length === 0 ? 'ELIGIBLE' : needsData.length && needsData.length === refused.length ? 'NEEDS_DATA' : 'REFUSED';
+   const definition = setupDefinition(setupId);
+diff --git a/test/publish-fix-119-the-hurdle-was-unreachable.test.js b/test/publish-fix-119-the-hurdle-was-unreachable.test.js
+new file mode 100644
+index 0000000..1d19d46
+--- /dev/null
++++ b/test/publish-fix-119-the-hurdle-was-unreachable.test.js
+@@ -0,0 +1,79 @@
++// PUBLISH-FIX-119 (2026-09-21). Why this application had never taken a trade — 7,889 scored decisions, zero entries, ever.
++//
++// Measured against the REAL cost law on a PERFECT book (infinite depth, one-tick spread, zero slippage — nothing thin to blame),
++// the smallest target that can EVER be sized is:
++//     stop 0.30% -> 4.55% | 0.50% -> 4.85% | 1.09% -> 5.75% | 1.72% -> 6.70% | 3.0% -> 8.60%
++// because the 1.5x reward-to-risk law is applied to FEE-INCLUSIVE terms: the 1.60% round trip is subtracted from the reward and
++// added to the risk, so the requirement is 1.5*(stop + fees) + fees.
++// The eight close calls of 2026-09-21 proposed targets of 0.20%, 0.28%, 0.37%, 0.71%, 1.31%, 1.40%, 1.77% — every one the high of
++// the last TWENTY ONE-MINUTE BARS. Three to twenty-five times too small. It was never close, and it never could be.
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import { minTargetDistance, derivedProjection, scenarioTarget } from '../judge/setups.js';
++import { evaluateEntry, sizeSearch, REWARD_RISK_MIN } from '../judge/cost.js';
++import { feeContract } from '../execution/contract.js';
++
++const ASK = 0.48422, TICK = 0.00001, RT = '0.016';
++const fee = feeContract({ venue: 'kraken', pairKey: 'UAIUSD', orderType: 'TAKER', rate: '0.008', rateKind: 'PAPER_REFERENCE', currency: 'QUOTE', roundingQuantum: '0.01', roundingMode: 'UP', minimumFee: '0', scope: 'ORDER_TOTAL', scheduleId: 'test', observedTs: 1789000000000 });
++const spec = { priceIncrement: '0.00001', qtyIncrement: '0.1', orderMin: '1', costMin: '5', status: 'online' };
++const perfect = () => { const lv = (s, d) => Array.from({ length: 400 }, (_, i) => [(s + d * i * TICK).toFixed(5), '5000000']); return { bids: lv(ASK - TICK, -1), asks: lv(ASK, +1), receiptTs: 0, feedEpoch: 1 }; };
++const thin = () => { const lv = (s, d) => Array.from({ length: 25 }, (_, i) => [(s + d * i * TICK * 5).toFixed(5), String(2000 + i * 800)]); return { bids: lv(ASK - TICK * 5, -1), asks: lv(ASK, +1), receiptTs: 0, feedEpoch: 1 }; };
++
++test('FIX119-1: the measurement — on a PERFECT book the old targets are unreachable at ANY size, and the hurdle is the fee-inclusive R/R', () => {
++  assert.equal(REWARD_RISK_MIN, '1.5');
++  const snapshot = perfect(); const stop = (ASK * (1 - 0.01086)).toFixed(5);
++  for (const tgtPct of [0.20, 0.28, 0.37, 0.71, 1.31, 1.40, 1.77, 3.0, 5.0]) {
++    const e = evaluateEntry({ snapshot, q: '1000', spec, fee, atr14: '0.0001', structuralStop: stop, targetPrice: (ASK * (1 + tgtPct / 100)).toFixed(5) });
++    assert.equal(e.status, 'REFUSED', `a ${tgtPct}% target is refused even on a perfect book`);
++    assert.ok(e.reasons.includes('REWARD_RISK_BELOW_1_5'), `${tgtPct}%: the binding reason is the fee-inclusive reward-to-risk law, not depth`);
++  }
++  // and it is NOT depth, spread or slippage: the same book sizes a big enough target immediately
++  const ok = evaluateEntry({ snapshot, q: '1000', spec, fee, atr14: '0.0001', structuralStop: stop, targetPrice: (ASK * 1.08).toFixed(5) });
++  assert.equal(ok.status, 'OK', 'the very same perfect book sizes an 8% target');
++});
++
++test('FIX119-2: the floor now knows about fees, and it equals the measured hurdle', () => {
++  for (const [stopPct, expected] of [[0.3, 4.45], [0.5, 4.75], [1.086, 5.63], [1.718, 6.58], [3.0, 8.50]]) {
++    const stop = ASK * (1 - stopPct / 100);
++    const pct = (minTargetDistance(ASK, stop, RT) / ASK) * 100;
++    assert.ok(Math.abs(pct - expected) < 0.02, `stop ${stopPct}% -> floor ${pct.toFixed(2)}%, expected ~${expected}%`);
++    const old = (minTargetDistance(ASK, stop, '0') / ASK) * 100;
++    assert.ok(old < pct, `the old fee-blind floor (${old.toFixed(2)}%) was below the real hurdle — that is why it never fired`);
++  }
++  assert.equal(minTargetDistance(ASK, ASK * 1.2, RT), 0, 'a stop above the entry is refused geometry, not a distance');
++  assert.equal(minTargetDistance(ASK, ASK * 0.99, '0'), (ASK - ASK * 0.99) * 1.5, 'fee rate 0 reproduces the old floor exactly');
++});
++
++test('FIX119-3: a setup without its own projection gets one from the bars it already froze — one 20-bar range above entry', () => {
++  assert.equal(derivedProjection(null, String(ASK)), null);
++  assert.equal(derivedProjection({ h20: '1', l20: '2' }, String(ASK)), null, 'an inverted range is not a projection');
++  assert.equal(derivedProjection({ h20: '0', l20: '0' }, String(ASK)), null);
++  const runner = derivedProjection({ h20: String(ASK * 1.06), l20: String(ASK * 0.94) }, String(ASK));
++  assert.ok(Math.abs((Number(runner) / ASK - 1) * 100 - 12) < 0.01, 'a 12% 20-bar range projects 12% above the entry');
++  const quiet = derivedProjection({ h20: String(ASK * 1.002), l20: String(ASK * 0.998) }, String(ASK));
++  assert.ok(Math.abs((Number(quiet) / ASK - 1) * 100 - 0.4) < 0.01, 'a quiet coin projects 0.4% — still under the floor, still refused');
++});
++
++test('FIX119-4: end to end on a REALISTIC thin book — the runner sizes, the quiet coin does not', () => {
++  const snapshot = thin(); const stop = (ASK * (1 - 0.01086)).toFixed(5);
++  const size = (ind) => sizeSearch({ snapshot, spec, fee, atr14: '0.004', structuralStop: stop, targetPrice: derivedProjection(ind, String(ASK)), cashAvailable: '500', riskBudget: '15' });
++  const runner = size({ h20: String(ASK * 1.06), l20: String(ASK * 0.94) });
++  assert.equal(runner.status, 'OK', 'a coin that actually moved gets a target that can pay, and sizes');
++  assert.ok(Number(runner.q) > 0 && Number(runner.evaluation.bufferedScenarioNetProfit) > 0, 'with a positive buffered profit after the full round trip');
++  const quiet = size({ h20: String(ASK * 1.002), l20: String(ASK * 0.998) });
++  assert.equal(quiet.status, 'NO_TRADE_SIZE', 'a coin going nowhere is still refused — the projection selects FOR movement');
++});
++
++test('FIX119-5: nothing was relaxed — fee rate 0 reproduces the old scenario byte for byte, and the cost law is untouched', () => {
++  const frozen = { scenarioRaw: String(ASK * 1.014), scenarioProjected: null, structuralStop: String(ASK * (1 - 0.01086)) };
++  const before = scenarioTarget(frozen, [], String(ASK), 0, null, '0');
++  assert.equal(before.target, frozen.scenarioRaw, 'no ind and no fee -> the raw target stands, exactly as before this fix');
++  const after = scenarioTarget(frozen, [], String(ASK), 0, { h20: String(ASK * 1.06), l20: String(ASK * 0.94) }, RT);
++  assert.ok(Number(after.target) > Number(frozen.scenarioRaw), 'with the fee-aware floor the projection is preferred');
++  const src = readCost();
++  assert.match(src, /export const REWARD_RISK_MIN = '1\.5';/, 'the reward-to-risk law did not move');
++  assert.match(src, /export const bufferOf = \(atr14, tick\) => max\(M\.mul\('2', tick\), M\.mul\('0\.1', atr14\)\);/, 'the execution buffer did not move');
++  assert.match(src, /export const REFERENCE_HAIRCUT = '0\.5';/, 'the depth haircut did not move');
++});
++import { readFileSync } from 'node:fs';
++function readCost() { return readFileSync('judge/cost.js', 'utf8'); }
+-- 
+2.43.0
+
+
+From 87116ed7aec545adc4c891207ad7418b4d7f92b5 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 21 Sep 2026 10:00:50 +0000
+Subject: [PATCH 2/2] tests: the differential base advances to the
+ PUBLISH-FIX-119 audited tree
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The differential reported one substantive change and only one: a recorded
+decision's scenario.target 100200 -> 104620 with its decisionDigest. No other
+field of any record differs. That is the audited ruler move of §4.47, so the
+base advances exactly as PUBLISH-FIX-83 advanced it from ea3bfbf to 1bfa669.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01RoFoPS22WFW1oUnbWzPayd
+---
+ test/judge-differential.test.js | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/test/judge-differential.test.js b/test/judge-differential.test.js
+index 230f902..2cd7854 100644
+--- a/test/judge-differential.test.js
++++ b/test/judge-differential.test.js
+@@ -1,5 +1,12 @@
+ // REVIEW CORRECTION item 2 + 5 — the DIFFERENTIAL preservation proof and the host latency measurement.
+ //
++// PUBLISH-FIX-119 (2026-09-21): the base moved from 1bfa669 to 4920323. The scenario floor was fee-blind and five of six
++// setups carried no projection, so the target every setup proposed (the high of the last twenty 1-minute bars, 0.20%-1.77%)
++// could never reach the fee-inclusive 1.5x reward-to-risk hurdle (4.55%-8.60%) at ANY size on ANY book — which is why the
++// application had never taken a trade in 7,889 scored decisions. The differential reported that change and ONLY that change:
++// one recorded decision's scenario.target 100200 -> 104620 with its decisionDigest, no other field of any record. Audited in
++// docs/JUDGE-PAPER-AUDIT.md §4.47 with its own test; the fence is now: the working tree equals the AUDITED tree at 4920323.
++//
+ // PUBLISH-FIX-83 (2026-09-20): the base moved from ea3bfbf to 1bfa669 — the last commit of the ONE full review. The review
+ // moved rulers on purpose (RV60 trails the decision, FI has a trade-count floor and widens its window, the depth band is
+ // measured from the best bid, unfilled shells close FLAT, the re-cross hold, the second look on data-only refusals), each
+@@ -39,7 +46,7 @@ import { SETUP_SELECTION_VERSION } from '../judge/setup-selection.js';
+ import { gitObject, HISTORY_SKIP } from './helpers/repo.js';
+ 
+ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+-const BASE_COMMIT = '1bfa669'; // PUBLISH-FIX-83 audited base (docs/JUDGE-PAPER-AUDIT.md §4.32)
++const BASE_COMMIT = '4920323'; // PUBLISH-FIX-119 audited base (docs/JUDGE-PAPER-AUDIT.md §4.47)
+ const T0 = Date.parse('2026-09-08T12:00:00Z');
+ const SAMPLE_LIMITS = Object.freeze({ maxSimultaneousAssetPositions: 3, maxModelledRiskPerPositionFraction: 0.01, maxAggregateModelledRiskFraction: 0.02, maxCorrelatedClusterModelledRiskFraction: 0.015, dailyLossRestrictionFraction: 0.05, peakEquityDrawdownRestrictionFraction: 0.1, maxGrossExposureFraction: 1, maxAssetExposureFraction: 1 });
+ 
+-- 
+2.43.0
+
