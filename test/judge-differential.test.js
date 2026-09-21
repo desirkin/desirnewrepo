@@ -1,5 +1,12 @@
 // REVIEW CORRECTION item 2 + 5 — the DIFFERENTIAL preservation proof and the host latency measurement.
 //
+// PUBLISH-FIX-119 (2026-09-21): the base moved from 1bfa669 to 4920323. The scenario floor was fee-blind and five of six
+// setups carried no projection, so the target every setup proposed (the high of the last twenty 1-minute bars, 0.20%-1.77%)
+// could never reach the fee-inclusive 1.5x reward-to-risk hurdle (4.55%-8.60%) at ANY size on ANY book — which is why the
+// application had never taken a trade in 7,889 scored decisions. The differential reported that change and ONLY that change:
+// one recorded decision's scenario.target 100200 -> 104620 with its decisionDigest, no other field of any record. Audited in
+// docs/JUDGE-PAPER-AUDIT.md §4.47 with its own test; the fence is now: the working tree equals the AUDITED tree at 4920323.
+//
 // PUBLISH-FIX-83 (2026-09-20): the base moved from ea3bfbf to 1bfa669 — the last commit of the ONE full review. The review
 // moved rulers on purpose (RV60 trails the decision, FI has a trade-count floor and widens its window, the depth band is
 // measured from the best bid, unfilled shells close FLAT, the re-cross hold, the second look on data-only refusals), each
@@ -39,7 +46,7 @@ import { SETUP_SELECTION_VERSION } from '../judge/setup-selection.js';
 import { gitObject, HISTORY_SKIP } from './helpers/repo.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const BASE_COMMIT = '1bfa669'; // PUBLISH-FIX-83 audited base (docs/JUDGE-PAPER-AUDIT.md §4.32)
+const BASE_COMMIT = '4920323'; // PUBLISH-FIX-119 audited base (docs/JUDGE-PAPER-AUDIT.md §4.47)
 const T0 = Date.parse('2026-09-08T12:00:00Z');
 const SAMPLE_LIMITS = Object.freeze({ maxSimultaneousAssetPositions: 3, maxModelledRiskPerPositionFraction: 0.01, maxAggregateModelledRiskFraction: 0.02, maxCorrelatedClusterModelledRiskFraction: 0.015, dailyLossRestrictionFraction: 0.05, peakEquityDrawdownRestrictionFraction: 0.1, maxGrossExposureFraction: 1, maxAssetExposureFraction: 1 });
 
