@@ -88,3 +88,27 @@ test('FIX94-6 (the shipped bars): the defaults are the $500-account floors, not 
   assert.equal(VOLATILITY_WATCH_DEFAULTS.maxStaleMin, 20); assert.equal(VOLATILITY_WATCH_DEFAULTS.sourceStaleMin, 5);
   assert.equal(VOLATILITY_WATCH_DEFAULTS.picks, 6); assert.equal(VOLATILITY_WATCH_DEFAULTS.band, 12); assert.equal(VOLATILITY_WATCH_DEFAULTS.minRange1hPct, 0.8);
 });
+
+// ---- PUBLISH-FIX-95 (2026-09-21): the nomination floor, the second door ------------------------------------------------------
+// FIX-94 got the runners RANKED and PICKED. tape/universe.js then re-verifies each nominee against the venue and refuses anything
+// under config.wideeye.nominationFloorUsd before the hot lane may adopt it. At $2,000,000 a day that refused almost every runner
+// the watch had just picked: of the 77 Kraken USD pairs that ran >= 10% on 2026-09-20, the liquid ones traded $180k-$264k a DAY
+// (CTSI $192k, GNOT $228k, LAPTOP $264k, B2 $180k) and only DRV ($2.06M) could pass. The floor is now $100k — the same line the
+// runners study used for "tradable at $500 without moving the book" — and the deep tape stays bounded by the hot lane's six slots.
+test('FIX95-1: tonight\'s runners clear the nomination floor and dust does not', async () => {
+  const { loadConfig } = await import('../lib/config.js');
+  const { mergeNominationsAndCap } = await import('../tape/universe.js');
+  const config = loadConfig();
+  assert.equal(config.wideeye.nominationFloorUsd, 100_000, 'the shipped floor');
+  // the venue's own 24h dollar volume for the coins the watch picked or ranked on 2026-09-20/21
+  const real = { DRV: 2_060_000, LAPTOP: 264_000, GNOT: 228_000, CTSI: 192_000, B2: 180_000, MYX: 220_000, SYND: 9_000, DUCK: 2_000, BLUE: 1_000 };
+  const assetPairs = Object.fromEntries(Object.keys(real).map((c) => [`${c}USD`, { wsname: `${c}/USD`, quote: 'USD', status: 'online' }]));
+  const tickers = Object.fromEntries(Object.entries(real).map(([c, usd]) => [`${c}USD`, { v: ['0', String(usd / 2)], p: ['2', '2'] }]));
+  const { pairs } = mergeNominationsAndCap([], Object.keys(real).map((coin) => ({ coin })), assetPairs, tickers, config);
+  const admitted = new Set(pairs.map((p) => p.coin));
+  for (const c of ['DRV', 'LAPTOP', 'GNOT', 'CTSI', 'B2', 'MYX']) assert.ok(admitted.has(c), `${c} ($${real[c]}/day) is tradable at $500 and must be verifiable`);
+  for (const c of ['SYND', 'DUCK', 'BLUE']) assert.ok(!admitted.has(c), `${c} ($${real[c]}/day) is dust — a $500 order would be the market`);
+  // and at the OLD floor only DRV survived: this is what the fix changed
+  const old = mergeNominationsAndCap([], Object.keys(real).map((coin) => ({ coin })), assetPairs, tickers, { ...config, wideeye: { ...config.wideeye, nominationFloorUsd: 2_000_000 } });
+  assert.deepEqual(old.pairs.map((p) => p.coin), ['DRV'], 'at $2M a day, 5 of these 6 tradable runners were refused at the venue check');
+});

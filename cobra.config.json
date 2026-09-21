@@ -23,7 +23,7 @@
     "extensionCapPct": 3,
     "minSamples": 60,
     "rippleCooldownMin": 60,
-    "nominationFloorUsd": 2000000,
+    "nominationFloorUsd": 100000,
     "deepUniverseCap": 30
   },
   "gateway": {

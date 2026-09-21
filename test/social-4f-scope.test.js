@@ -168,6 +168,13 @@ test('SCOPE-5 (7). research configuration is closed: no wildcard, bounded caps, 
     if (k === 'universe') continue; // audited below
     // PUBLISH-FIX-83 item 38 (2026-09-20): universeExpansion.resource.maxHeapMb 512 -> 3000, ONE value with the paper profile's overlay (config/paper-runtime.json) — the two used to disagree
     if (k === 'universeExpansion') { const { hotLane, resource, ...rest } = current[k]; assert.deepEqual(hotLane, { slots: 6, tenureMs: 7_200_000 }); assert.deepEqual(resource, { ...baseline[k].resource, maxHeapMb: 3000 }); const { resource: _r, ...baseRest } = baseline[k]; assert.deepEqual(rest, baseRest, 'config.universeExpansion unchanged but for hotLane and the heap ceiling'); continue; }
+    // PUBLISH-FIX-95 (2026-09-21): wideeye.nominationFloorUsd 2_000_000 -> 100_000, ONE value. A nominated coin must clear this 24-hour
+    // dollar floor before tape/universe.js will verify it for the hot lane, so at $2M the VOLATILITY WATCH's movers were ranked, picked
+    // and then refused at the venue check: of the 77 Kraken USD pairs that ran >= 10% on 2026-09-20, the liquid ones sat at $180k-$264k
+    // a day (CTSI $192k, GNOT $228k, LAPTOP $264k, B2 $180k) and only DRV ($2.06M) could pass. $100k a day is the same line the runners
+    // study used for "tradable at $500 without moving the book" ($500 is 0.5% of a day's flow); the deep tape is still bounded by the
+    // hot lane's six slots, and the JUDGE's own book-depth and protective-exit-at-depth law on the live book remains the real gate.
+    if (k === 'wideeye') { const { nominationFloorUsd, ...rest } = current[k]; assert.equal(nominationFloorUsd, 100_000); const { nominationFloorUsd: _f, ...baseRest } = baseline[k]; assert.deepEqual(rest, baseRest, 'config.wideeye unchanged but for the nomination floor'); continue; }
     assert.deepEqual(k === 'paper' ? { ...current[k], baseBalanceUsd: baseline.paper.baseBalanceUsd } : current[k], baseline[k], `config.${k} unchanged`);
   }
   assert.deepEqual(current.universe, [], 'PUBLISH-FIX-2: the legacy named-coin universe seed is removed — no hardcoded coins remain in any config');

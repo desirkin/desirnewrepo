@@ -291,6 +291,18 @@ nothing (heavy selling +0.06% at 15 minutes, strong buying +0.07%). A line someb
   cost and sizing law on the live book, which is where liquidity is actually decided. Coins below the dust line (SYND at $9k/day, BLUE at
   $1k/day) are not "missed": a $500 order would be the market. Tests: publish-fix-94-watch-sees-runners (6; 4 fail on the previous code),
   learning-volatility-watch (4, updated to the new law and saying how).
+- `cobra.config.json` (PUBLISH-FIX-95, 2026-09-21; ONE value, audited in test/social-4f-scope.test.js SCOPE-5): `wideeye.
+  nominationFloorUsd` 2_000_000 -> 100_000. FIX-94 got the runners ranked and picked; tape/universe.js then re-verifies every
+  nominee against the venue and refused anything under this 24-hour dollar floor before the hot lane could adopt it, so the
+  movers were picked and then turned away at the second door. Of the 77 Kraken USD pairs that ran >= 10% on 2026-09-20, the
+  liquid ones traded $180k-$264k a DAY (CTSI $192k, GNOT $228k, LAPTOP $264k, B2 $180k); only DRV ($2.06M) could pass $2M.
+  $100k a day is the line the runners study used for "tradable at $500 without moving the book" ($500 = 0.5% of a day's flow).
+  Bounds unchanged: the hot lane still admits at most 6 (universeExpansion.hotLane.slots, 2 h tenure), the deep universe is
+  still capped at 30 by volume (the hot lane verifies against the UNCAPPED relaxed list, so an adopted runner is not then
+  shed), and the JUDGE's frozen book-depth / protective-exit-at-depth / cost law on the live book remains the real gate.
+  Tests: publish-fix-94-watch-sees-runners FIX95-1 (the six tradable runners clear it, SYND/DUCK/BLUE dust does not, and at
+  the old floor only DRV survived); wideeye nomination-merge fixture moved to a $50k below-floor nominee; social-4f-scope
+  SCOPE-5 carries the audited exception.
 - `tools/gate-study-process.js` / `tools/gate-study-child.js`: the join runs in a child process every 30 minutes (90 s
   after boot first); the main thread never reads the ledger; the lesson lands in `data/learning/gate-lessons/lesson.json`
   (+ `state.json` with the proposal history). `fly.js` composes the reader as the Judge's port.

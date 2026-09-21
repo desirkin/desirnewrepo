@@ -70,10 +70,12 @@ test('nomination merge: relaxed floor, venue re-verification, cap 30, shed lowes
     NOMCUSD: { wsname: 'NOMC/USD', quote: 'USD', status: 'online' },
   };
   const tick = (usd) => ({ v: ['0', String(usd / 2)], p: ['2', '2'] });
-  const tickers = { NOMAUSD: tick(5e6), NOMBUSD: tick(1e6), NOMCUSD: tick(4e6) };
+  // PUBLISH-FIX-95 (2026-09-21): the relaxed nomination floor is now $100k a day (was $2M), so the fixture's "below the floor"
+  // nominee is $50k — dust for a $500 order. The law under test is unchanged: the VENUE's own volume decides, not the claim.
+  const tickers = { NOMAUSD: tick(5e6), NOMBUSD: tick(5e4), NOMCUSD: tick(4e6) };
   const noms = [
     { coin: 'NOMA', usdVol24h: 999e9 }, // claim is ignored; venue says $5M -> in
-    { coin: 'NOMB' }, // venue says $1M -> below relaxed floor -> out
+    { coin: 'NOMB' }, // venue says $50k -> below the relaxed floor -> out
     { coin: 'NOMC' }, // $4M -> in
     { coin: 'MIN0' }, // already present -> no duplicate
     { coin: 'GHOST' }, // not on venue -> out
