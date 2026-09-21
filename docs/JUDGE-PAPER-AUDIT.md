@@ -276,6 +276,21 @@ nothing (heavy selling +0.06% at 15 minutes, strong buying +0.07%). A line someb
   every sweep. A settlement is now a NEW attachment (this sweep's clock, superseding the row it settles); the tick report
   names settledAtDeadline / skippedRecent / written so a stalled sweep is visible in status. Tests: publish-fix-92-settle-supersedes
   (fails on the previous code).
+- `learning/volatility-watch.js` (PUBLISH-FIX-94, 2026-09-21; not frozen): THE WATCH SEES THE RUNNERS. Artifact: learning/volatility/
+  current.json at 2026-09-21 00:47 UTC read "ranked 27, skipped { stale 409, thin 121, quiet 0 }", picks SUI / NEAR / AVAX / ZEC; Kraken's
+  ticker for the same 24 h: 77 USD pairs ran >= 10% from the open, 29 >= 20% (SYND +24.0, NOCK +22.6, B2 +22.3 on a 62% range, CTSI +22.1 on
+  $192k/day and 26 wide-eye sweeps, GNOT, LAPTOP) — 0 of 77 in the Judge's boot universe, 1 of 77 ever looked at. Three rules in the
+  watch did it: a coin was "stale" if it had not printed for 5 minutes (the collector closes a candle only when the next trade arrives, so
+  409 healthy thin coins read as dead feeds on a quiet night); the floor was $150k an HOUR / 60 prints and the liquidity weight was 0 below
+  $100k an hour (the runners do $2k-$260k a DAY, so even a ranked runner scored 0); and 30 minutes of candles were needed before a range was
+  measured (blind to the first half hour of a run). Now: stream liveness is judged once for the whole source (newest receipt across every
+  coin, sourceStaleMin 5); a coin is rankable if it printed within maxStaleMin 20; the window is anchored at NOW (an old spike on a coin
+  that then went quiet cannot rank); minBars 5; the dust line for a $500 order is $10k in the hour and ten prints; the liquidity and
+  print-density weights are DISCOUNTS that can each at most halve the score (0.5 + 0.5·w), never a veto — big moves on modest money outrank
+  small moves on huge money, which is the owner's directive. The Judge is UNCHANGED: every nominee still faces its frozen book-depth,
+  cost and sizing law on the live book, which is where liquidity is actually decided. Coins below the dust line (SYND at $9k/day, BLUE at
+  $1k/day) are not "missed": a $500 order would be the market. Tests: publish-fix-94-watch-sees-runners (6; 4 fail on the previous code),
+  learning-volatility-watch (4, updated to the new law and saying how).
 - `tools/gate-study-process.js` / `tools/gate-study-child.js`: the join runs in a child process every 30 minutes (90 s
   after boot first); the main thread never reads the ledger; the lesson lands in `data/learning/gate-lessons/lesson.json`
   (+ `state.json` with the proposal history). `fly.js` composes the reader as the Judge's port.

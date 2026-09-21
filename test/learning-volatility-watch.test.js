@@ -43,14 +43,22 @@ test('VW-02. the ranking: the coins that MOVED this hour first, BTC-like coins t
     USDT: candles({ base: 1, rangePct: 6, usdPerMin: 9_000 }),            // excluded base
   });
   const { ranked, skipped } = rankByVolatility({ seriesSource: src, nowTs: NOW, exclude: new Set(['USDT']) });
-  assert.deepEqual(ranked.map((r) => r.coin), ['PEPE', 'WIF', 'AVAX', 'ZZZ'], JSON.stringify(ranked.map((r) => [r.coin, r.score, r.range1hPct, r.usdVol1h, r.trades1h])));
-  assert.equal(skipped.quiet, 1); assert.equal(skipped.thin, 2); assert.equal(skipped.stale, 1);
-  assert.ok(ranked[3].score < ranked[2].score && ranked[3].liquidityWeight < 0.2, 'a 12% range on $180k stays visible but ranks under a real 1.6% on $36M');
-  assert.ok(ranked[0].range1hPct > 8 && ranked[0].usdVol1h > 2_000_000); assert.equal(ranked[0].symbol, 'PEPE/USD'); assert.ok(ranked[0].range4hPct !== null);
-  // the rank is liquidity-weighted: PEPE 9% on $2.4M (weight ~0.69) scores ~6.2, WIF 5% on $1.5M (~0.59) ~3.0, AVAX 1.6% on $36M (weight 1, 2,400 prints over the 120 ref -> density 1) 1.6
-  assert.ok(ranked[0].score > ranked[1].score && ranked[1].score > ranked[2].score); assert.equal(ranked[2].liquidityWeight, 1); assert.equal(ranked[2].trades1h, 2400);
-  // a 3% "range" on barely $1.05M ranks BELOW AVAX's 1.6% on $36M: the raw range no longer wins on its own
-  const thin = rankByVolatility({ seriesSource: source({ PEPE: candles({ base: 0.00001, rangePct: 3, usdPerMin: 17_500 }), AVAX: candles({ base: 30, rangePct: 1.6, usdPerMin: 600_000, tradesPerMin: 120 }) }), nowTs: NOW }).ranked; assert.deepEqual(thin.map((r) => r.coin), ['AVAX', 'PEPE'], JSON.stringify(thin.map((r) => [r.coin, r.score])));
+  // PUBLISH-FIX-94: the law changed and this test says how. ZZZ (12% on $180k) and DEAD (12% on $90k) are RANKED — the floor is the dust line
+  // for a $500 order ($10k), not the majors' bar; OLD (last print 20 minutes ago) is quiet-now at the edge, not a dead feed, and its window is
+  // anchored at NOW so only the part of its move inside the hour counts. SPARSE (no prints) is still thin. BTC (0.4%) is still quiet. USDT is out.
+  const by = Object.fromEntries(ranked.map((r) => [r.coin, r]));
+  assert.deepEqual(Object.keys(by).sort(), ['AVAX', 'DEAD', 'OLD', 'PEPE', 'WIF', 'ZZZ'], JSON.stringify(ranked.map((r) => [r.coin, r.score, r.range1hPct, r.usdVol1h, r.trades1h])));
+  assert.equal(skipped.quiet, 1); assert.equal(skipped.thin, 1); assert.equal(skipped.stale, 0); assert.equal(skipped.streamStale, false);
+  assert.ok(by.PEPE.range1hPct > 8 && by.PEPE.usdVol1h > 2_000_000); assert.equal(by.PEPE.symbol, 'PEPE/USD'); assert.ok(by.PEPE.range4hPct !== null);
+  // the owner's directive, in the ranking: a 12% move on $180k OUTRANKS a 9% move on $2.4M, a 5% move on $1.5M and a 1.6% move on $36M — big
+  // moves on modest money beat small moves on huge money; the liquidity weight still grades ZZZ (~0.63) below PEPE / WIF / AVAX (1), as a
+  // discount that can at most halve the score, never as a veto (PUBLISH-FIX-94)
+  assert.equal(ranked[0].coin, 'ZZZ', JSON.stringify(ranked.map((r) => [r.coin, r.score])));
+  assert.ok(by.ZZZ.score > by.PEPE.score && by.PEPE.score > by.WIF.score && by.WIF.score > by.AVAX.score, JSON.stringify([by.ZZZ.score, by.PEPE.score, by.WIF.score, by.AVAX.score]));
+  assert.ok(by.ZZZ.liquidityWeight > 0.5 && by.ZZZ.liquidityWeight < 0.75, `ZZZ weight ${by.ZZZ.liquidityWeight}`); assert.ok(by.DEAD.liquidityWeight > 0.4 && by.DEAD.liquidityWeight < by.ZZZ.liquidityWeight);
+  assert.equal(by.AVAX.liquidityWeight, 1); assert.equal(by.AVAX.trades1h, 2400); assert.equal(by.AVAX.densityWeight, 1);
+  // PUBLISH-FIX-94: a 3% move on $1.05M now outranks AVAX's 1.6% on $36M — $1M an hour is plenty for a $500 order, so the bigger move wins
+  const thin = rankByVolatility({ seriesSource: source({ PEPE: candles({ base: 0.00001, rangePct: 3, usdPerMin: 17_500 }), AVAX: candles({ base: 30, rangePct: 1.6, usdPerMin: 600_000, tradesPerMin: 120 }) }), nowTs: NOW }).ranked; assert.deepEqual(thin.map((r) => r.coin), ['PEPE', 'AVAX'], JSON.stringify(thin.map((r) => [r.coin, r.score])));
 });
 
 test('VW-03. selectPicks: entrants get the clock they entered with and keep it while inside the band; a coin leaves only when it falls out of the band; the list never exceeds picks', () => {
@@ -87,8 +95,8 @@ test('VW-04. end to end: the source writes current.json, nominates with the entr
     assert.equal(JSON.parse(readFileSync(volatilityFile(dir), 'utf8')).picks.length, 1);
     assert.equal(watch.status().authority, 'NONE'); assert.equal(watch.status().counters.entered, 2); assert.equal(watch.status().counters.left, 1);
     assert.throws(() => createVolatilityWatch({ seriesSource: () => null, dataDir: dir }), /coins\(\)/);
-    assert.ok(VOLATILITY_WATCH_DEFAULTS.picks === 6); assert.equal(VOLATILITY_WATCH_DEFAULTS.minBars, 30, 'PUBLISH-FIX-71: 30 of the last 60 minutes rank a coin (a republish leaves 15–30 min on disk)');
+    assert.ok(VOLATILITY_WATCH_DEFAULTS.picks === 6); assert.equal(VOLATILITY_WATCH_DEFAULTS.minBars, 5, 'PUBLISH-FIX-94: five minutes inside the window are enough to see a run begin (was 30: blind to the first half hour)');
     // PUBLISH-FIX-71: a coin with 35 of the last 60 minutes on disk is ranked (was: not until 50)
-    { const r35 = rankByVolatility({ seriesSource: source({ ZZ: candles({ base: 3, rangePct: 6, usdPerMin: 50_000, minutes: 35 }) }), nowTs: NOW }); assert.deepEqual(r35.ranked.map((x) => x.coin), ['ZZ']); const r25 = rankByVolatility({ seriesSource: source({ ZZ: candles({ base: 3, rangePct: 6, usdPerMin: 50_000, minutes: 25 }) }), nowTs: NOW }); assert.deepEqual(r25.ranked, []); assert.equal(r25.skipped.thin, 1); }
+    { const r35 = rankByVolatility({ seriesSource: source({ ZZ: candles({ base: 3, rangePct: 6, usdPerMin: 50_000, minutes: 35 }) }), nowTs: NOW }); assert.deepEqual(r35.ranked.map((x) => x.coin), ['ZZ']); const r25 = rankByVolatility({ seriesSource: source({ ZZ: candles({ base: 3, rangePct: 6, usdPerMin: 50_000, minutes: 25 }) }), nowTs: NOW }); assert.deepEqual(r25.ranked.map((x) => x.coin), ['ZZ'], 'PUBLISH-FIX-94: 25 minutes rank too'); const r3 = rankByVolatility({ seriesSource: source({ ZZ: candles({ base: 3, rangePct: 6, usdPerMin: 50_000, minutes: 3 }) }), nowTs: NOW }); assert.deepEqual(r3.ranked, []); assert.equal(r3.skipped.thin, 1, 'under five minutes of candles is still too few'); }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
