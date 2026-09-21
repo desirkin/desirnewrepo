@@ -1,0 +1,234 @@
+From 4cb930a8770c3118358c4a81b09d63c351b7a04a Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 21 Sep 2026 03:03:03 +0000
+Subject: [PATCH] PUBLISH-FIX-102: the control that ate 28 bites in silence,
+ and a 60s race
+
+Owner directive: "Find everything that will stop us... there's nothing
+you don't know so find everything don't put anything off."
+
+THE CONTROL. CAGE appears 28 times in the recorded episodes, between
+2026-09-17T19:28:51Z and 2026-09-19T13:24:12Z, and it is the ONLY
+restriction that has ever fired (KILL 0, OVERLOAD 0, FEED_IMPAIRED 0,
+DAILY_LOSS 0, PEAK_DRAWDOWN 0, PAPER_LIQUIDITY_UNCERTAIN 0,
+RECONCILIATION_REQUIRED 0, WRITER_LOST 0, DB_UNAVAILABLE 0). Each was a
+look that passed every gate AND found a size - the closest this account
+has ever come to eating - refused by an owner control and recorded as
+one word nobody reads. Nothing since 09-19 13:24, so the cage is NOT a
+current blocker; it was one for ~42 hours in silence.
+
+Now: RESTRICTION BLOCKED A BITE: <symbol> <setup> passed every gate and
+found a size (q at price, risk) - refused by <reasons>. This is a
+CONTROL, not the market: it stays until the owner clears it.
+Counted by name and printed on the funnel line beside the close calls.
+The admission decision is unchanged; execution/authority.js untouched.
+
+THE RACE. volatility-watch writes picks every 30s; tape/run.js adopted
+them every 60s, and the Judge is nominated from the same picks - so a
+coin that just started running could be offered to the Judge for up to
+a minute before anyone had subscribed to its book, and was refused
+FEED_NOT_IN_TAPE_UNIVERSE (the top live refusal in the wall census).
+Interval now 15s. The pass still returns before any REST call when
+there is nothing stale and nothing new, and hotLaneBusy still makes a
+slow pass skip - four times the rate, not four times the cost.
+
+Frozen: judge 5233617b47ae -> 6e7022571afd, all e35b54c87b63 ->
+d393d661b0b6; execution and watch/watch.js unchanged. tape/run.js
+re-pinned 4e35ceac2bd0 -> 04e0adcecda4. Recorded as
+docs/JUDGE-PAPER-AUDIT.md 4.39. Fenced by
+test/publish-fix-102-nothing-silent.test.js (5).
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01RoFoPS22WFW1oUnbWzPayd
+---
+ docs/JUDGE-PAPER-AUDIT.md                   | 29 +++++++++-
+ fly.js                                      |  2 +-
+ judge/judge.js                              | 11 +++-
+ tape/run.js                                 |  7 ++-
+ test/publish-fix-102-nothing-silent.test.js | 63 +++++++++++++++++++++
+ test/social-4f-scope.test.js                |  2 +-
+ 6 files changed, 108 insertions(+), 6 deletions(-)
+ create mode 100644 test/publish-fix-102-nothing-silent.test.js
+
+diff --git a/docs/JUDGE-PAPER-AUDIT.md b/docs/JUDGE-PAPER-AUDIT.md
+index 44c7ebe..9eb0f41 100644
+--- a/docs/JUDGE-PAPER-AUDIT.md
++++ b/docs/JUDGE-PAPER-AUDIT.md
+@@ -60,12 +60,37 @@ Digest law: `sha256` over the sorted repository-relative file list, each entry a
+ 
+ ```
+ FROZEN_FOR_PAPER
+-judge/*.js       5233617b47ae5de6fd91cd180bf3c8f7360645cbbdf406f430298d72220f1abb
++judge/*.js       6e7022571afde3e41a5f864ebc037f6ed175ce9ac9c73fc324cda6d39e80a3c8
+ execution/*.js   bfcff6846d4dfd157eb84c2a5504298ba55244c09afeb746f33a1f5d1095a9a4
+ watch/watch.js   6f319a1ee72a2b43346b8d07f906bb3ca31566ca7e3be0180d57f551d8a1afe1
+-all (49 files)   e35b54c87b63c8384515ff54be10d775f05ae4a246b2d36bc8fc4bc361410e30
++all (49 files)   d393d661b0b62396ee5438abb7385df4175a274de196961af72f7e56419e4569
+ ```
+ 
++### 4.39 Audited change — 2026-09-21 PUBLISH-FIX-102: a control that eats a sized bite says so; the deep tape adopts on the watch's clock (previous judge digest `5233617b47ae…`; now `6e7022571afd…`; all `e35b54c87b63…` → `d393d661b0b6…`; execution and watch/watch.js UNCHANGED; 49 files; `tape/run.js` re-pinned in `test/social-4f-scope.test.js`)
++
++Two silences and one race, all found by reading the snake's own records rather than the code.
++
++THE CONTROL. `CAGE` appears 28 times in the recorded episodes, between 2026-09-17T19:28:51Z and 2026-09-19T13:24:12Z, and it is
++the ONLY restriction that has ever fired: KILL 0, OVERLOAD 0, FEED_IMPAIRED 0, DAILY_LOSS 0, PEAK_DRAWDOWN 0,
++PAPER_LIQUIDITY_UNCERTAIN 0, RECONCILIATION_REQUIRED 0, WRITER_LOST 0, DB_UNAVAILABLE 0. Each of the 28 was a look that passed
++every gate AND found a size — the closest this account has ever come to an entry — refused by an owner control, recorded as one
++word in the ledger and never named on any line the owner reads. Nothing since 2026-09-19T13:24Z, so the cage is not a current
++blocker; it was one for about 42 hours and nobody was told. `judge/judge.js` now logs `RESTRICTION BLOCKED A BITE:` with the
++symbol, the setup, the size and price it had found, the risk, and every reason, ending "This is a CONTROL, not the market: it
++stays until the owner clears it"; the reasons are counted by name (`counters.restrictionRefusals` / `restrictionReasons`,
++bounded to 24) and `fly.js` prints them on the funnel line beside the close calls. The admission decision is byte-for-byte what
++it was — the look is still refused, with the same reasons, recorded the same way; `execution/authority.js` is untouched.
++
++THE RACE. `learning/volatility-watch.js` writes its picks every 30 s; `tape/run.js` adopted them into the deep tape every 60 s,
++while the Judge is nominated from the same picks — so a coin that had just started running could be offered to the Judge for up
++to a minute before anyone had subscribed to its order book, and was refused `FEED_NOT_IN_TAPE_UNIVERSE` (the top live refusal of
++the 2026-09-21 wall census). The interval is now 15 s. The pass is unchanged and still returns before any REST call or universe
++rewrite when there is no stale slot and no unseen nominee, and `hotLaneBusy` still makes a slow pass skip rather than queue, so
++four times the rate is not four times the cost. `tape/run.js` re-pinned `4e35ceac2bd0…` → `04e0adcecda4…`.
++
++Fenced by `test/publish-fix-102-nothing-silent.test.js` (5 tests, including that the control still refuses and the control layer
++is untouched). Authority unchanged: PAPER_SIMULATION_ONLY.
++
+ ### 4.38 Audited change — 2026-09-21 PUBLISH-FIX-101: the second look has never armed once; two right-now flow gates were missing from its set (previous judge digest `96f83523029c…`; now `5233617b47ae…`; all `6016f931e155…` → `e35b54c87b63…`; execution and watch/watch.js UNCHANGED; 49 files)
+ 
+ `judge/judge.js` only. The second look of §4.29 (PUBLISH-FIX-79, owner directive 2026-09-19: "fix the thing that will make him
+diff --git a/fly.js b/fly.js
+index d8c0e2b..ec57cd8 100644
+--- a/fly.js
++++ b/fly.js
+@@ -559,7 +559,7 @@ if (SERPENT_MODE === 'DATA_ONLY') {
+           // bytes carried: the whole account state travels twice per commit) vs plain queries (the tape) — and the pool gauge
+           let dbClocks = '';
+           try { const c = getPersistence()?.db?.clocks?.() ?? null; if (c) { const kb = (x) => (x && Number.isFinite(x.p50) ? `p50 ${Math.round(x.p50 / 1024)} / max ${Math.round(x.max / 1024)} KB` : 'no samples'); dbClocks = `; DB: tx ${ms(c.tx)} (statements/tx p50 ${c.txStatements?.p50 ?? '?'}, bytes/tx ${kb(c.txParamBytes)}); pool checkout wait ${ms(c.checkoutWait)} (failures ${c.checkoutFailures}, retried ${c.checkoutRetries ?? 0}); query ${ms(c.query)}; pool ${c.pool?.total ?? '?'} open / ${c.pool?.idle ?? '?'} idle / ${c.pool?.waiting ?? '?'} waiting of ${c.pool?.max} (${c.pool?.lockSessions} held for life by locks)${c.slowestTx ? `; slowest tx ${c.slowestTx.ms} ms, ${c.slowestTx.statements} statements, ${Math.round(c.slowestTx.paramBytes / 1024)} KB, began '${c.slowestTx.first}'` : ''}`; } } catch (err) { dbClocks = `; DB clocks unavailable (${String(err?.message ?? err).slice(0, 80)})`; }
+-          console.log(`JUDGE FUNNEL: ${st.candidates} candidates; books ${k.books ?? 0}${d('books')}, trades ${k.trades ?? 0}${d('trades')}; crossings ${k.crossings ?? 0}${d('crossings')} -> confirmations ${k.confirmations ?? 0}${d('confirmations')} -> expired ${k.expired ?? 0}${d('expired')} (queue-delay expired ${k.queueDelayExpired ?? 0}); decisions ${k.decisions ?? 0}${d('decisions')}, entries ${k.entries ?? 0}${d('entries')}, close calls (every gate passed, no size) ${k.closeCalls ?? 0}${d('closeCalls')}, needs-data ${k.needsData ?? 0}, stale re-offered ${k.staleReoffered ?? 0}, lock waits ${k.lockWaits ?? 0} / re-offered ${k.lockReoffered ?? 0} / appends ${k.lockBatches ?? 0} / coalesced ${k.lockCoalesced ?? 0}; move-too-old ${k.moveTooOld ?? 0}; SECOND LOOK: flow-only refusals ${k.flowOnlyRefusals ?? 0} -> looks retaken ${k.secondLookCrossings ?? 0} (armed ${k.secondLooksArmed ?? 0}, dropped ${k.secondLooksDropped ?? 0}, data looks ${k.dataLooksScheduled ?? 0}); chains ended by: ${Object.entries(k.secondLookEndedBy ?? {}).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([g, n]) => `${g} ${n}`).join(', ') || 'nothing'}; last-256 by status ${JSON.stringify(byStatus)}; top refusals: ${refusals}; top crossers: ${crossers}${clocks}${dbClocks}; ${loopLag.line()}; ${relookSource ? relookSource.line() : 'LEARNED RE-LOOK: not started'}; ${volatilityWatch ? volatilityWatch.line() : 'VOLATILITY WATCH: not started'}; ${moveClockLesson ? moveClockLesson.line() : 'MOVE CLOCK: not started'}; ${scoutSource ? scoutSource.line() : 'SOCRATES SCOUT: not started'}${neverWatch.size ? `; NEVER-WATCH: ${[...neverWatch].join(',')} (${neverWatchDropped} nominations dropped at the last pass)` : ''}`);
++          console.log(`JUDGE FUNNEL: ${st.candidates} candidates; books ${k.books ?? 0}${d('books')}, trades ${k.trades ?? 0}${d('trades')}; crossings ${k.crossings ?? 0}${d('crossings')} -> confirmations ${k.confirmations ?? 0}${d('confirmations')} -> expired ${k.expired ?? 0}${d('expired')} (queue-delay expired ${k.queueDelayExpired ?? 0}); decisions ${k.decisions ?? 0}${d('decisions')}, entries ${k.entries ?? 0}${d('entries')}, close calls (every gate passed, no size) ${k.closeCalls ?? 0}${d('closeCalls')}, blocked by a CONTROL after sizing ${k.restrictionRefusals ?? 0}${Object.keys(k.restrictionReasons ?? {}).length ? ` [${Object.entries(k.restrictionReasons).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([r, n]) => `${r} ${n}`).join(', ')}]` : ''}, needs-data ${k.needsData ?? 0}, stale re-offered ${k.staleReoffered ?? 0}, lock waits ${k.lockWaits ?? 0} / re-offered ${k.lockReoffered ?? 0} / appends ${k.lockBatches ?? 0} / coalesced ${k.lockCoalesced ?? 0}; move-too-old ${k.moveTooOld ?? 0}; SECOND LOOK: flow-only refusals ${k.flowOnlyRefusals ?? 0} -> looks retaken ${k.secondLookCrossings ?? 0} (armed ${k.secondLooksArmed ?? 0}, dropped ${k.secondLooksDropped ?? 0}, data looks ${k.dataLooksScheduled ?? 0}); chains ended by: ${Object.entries(k.secondLookEndedBy ?? {}).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([g, n]) => `${g} ${n}`).join(', ') || 'nothing'}; last-256 by status ${JSON.stringify(byStatus)}; top refusals: ${refusals}; top crossers: ${crossers}${clocks}${dbClocks}; ${loopLag.line()}; ${relookSource ? relookSource.line() : 'LEARNED RE-LOOK: not started'}; ${volatilityWatch ? volatilityWatch.line() : 'VOLATILITY WATCH: not started'}; ${moveClockLesson ? moveClockLesson.line() : 'MOVE CLOCK: not started'}; ${scoutSource ? scoutSource.line() : 'SOCRATES SCOUT: not started'}${neverWatch.size ? `; NEVER-WATCH: ${[...neverWatch].join(',')} (${neverWatchDropped} nominations dropped at the last pass)` : ''}`);
+         } catch (err) { console.error(`JUDGE FUNNEL line: ${err.message}`); }
+       };
+       const runOnce = () => recorder.tick().then((summary) => { runResearch(); logLedger(summary); logFunnel(); }).catch((err) => console.error(`LEARNING DATA CLOCK tick: ${err.message}`));
+diff --git a/judge/judge.js b/judge/judge.js
+index 68195df..7e018f5 100644
+--- a/judge/judge.js
++++ b/judge/judge.js
+@@ -521,7 +521,16 @@ export function createJudge({ accountId, policy, policyDigest, dispatcher, feed,
+     // challenger verdicts (focused completion §5) computed from REAL inputs at D through the production feature functions: an arm admits only
+     // on its declared law (D1 KNOWN ALLOW, D2 KNOWN ALLOW / NO_RULE, D3 KNOWN ALLOW); UNKNOWN never admits; every verdict is a closed record
+     let verdicts = null; if (armRule?.challengers?.length) { const ch = challengerVerdicts({ c, D, snap, fast, found, e, fee, setupId, episodeId, frozen }); verdicts = ch.verdicts; if (ch.blocked.length) { tracker.decide('ENTRY_REFUSED', now()); return recordRefusal(c, setupId, episodeId, 'ENTRY_REFUSED', ch.blocked, snap, { inputMode, caseRefs, measurements, invalidation: setup.invalidation, scenario: { target: setup.scenario.target, cappedBy: setup.scenario.cappedBy?.price ?? null, kind: 'SCENARIO_NOT_FORECAST' }, valuationRef, sizing, verdicts }); } }
+-    if (!admission.ok) { tracker.decide('ENTRY_REFUSED', now()); return recordRefusal(c, setupId, episodeId, 'ENTRY_REFUSED', admission.reasons, snap, { inputMode, caseRefs, measurements, invalidation: setup.invalidation, scenario: { target: setup.scenario.target, cappedBy: setup.scenario.cappedBy?.price ?? null, kind: 'SCENARIO_NOT_FORECAST' }, valuationRef, sizing, verdicts }); }
++    if (!admission.ok) {
++      // PUBLISH-FIX-102 (2026-09-21): a look that passed every gate AND found a size and is then refused by a RESTRICTION is the
++      // loudest thing that can happen short of a bite, and it left one word in the ledger. Between 2026-09-17 19:28 and
++      // 2026-09-19 13:24 the CAGE ate 28 of these and the owner was never told, on any line, that a control of his was the reason.
++      counters.restrictionRefusals = (counters.restrictionRefusals ?? 0) + 1;
++      counters.restrictionReasons = counters.restrictionReasons ?? {};
++      for (const r of admission.reasons) if (counters.restrictionReasons[r] !== undefined || Object.keys(counters.restrictionReasons).length < 24) counters.restrictionReasons[r] = (counters.restrictionReasons[r] ?? 0) + 1;
++      log(`RESTRICTION BLOCKED A BITE: ${c.symbol} ${setupId} passed every gate and found a size (${found.q} at ${e.entryLimitPrice}, risk ${e.scenarioStressedLoss}) — refused by ${admission.reasons.join(', ')}. This is a CONTROL, not the market: it stays until the owner clears it.`);
++      tracker.decide('ENTRY_REFUSED', now()); return recordRefusal(c, setupId, episodeId, 'ENTRY_REFUSED', admission.reasons, snap, { inputMode, caseRefs, measurements, invalidation: setup.invalidation, scenario: { target: setup.scenario.target, cappedBy: setup.scenario.cappedBy?.price ?? null, kind: 'SCENARIO_NOT_FORECAST' }, valuationRef, sizing, verdicts });
++    }
+     const adaptiveRank = resolveAdaptiveRanking({ c, setupId, D, snap, evaluation: e });
+     if (adaptiveRank) measurements = [...measurements, adaptiveRank.measurement];
+     // ranked admission: wait for this pass's batch to be ordered, then re-admit against the state the earlier winners left behind
+diff --git a/tape/run.js b/tape/run.js
+index 4def244..b02a86c 100644
+--- a/tape/run.js
++++ b/tape/run.js
+@@ -180,7 +180,12 @@ export async function runTape({ minutes = null, chaosAfterSec = null, log = cons
+     } catch (err) { log(`[${nowIso()}] HOT LANE degraded (tape unaffected): ${String(err?.message ?? err).slice(0, 160)}`); }
+     finally { hotLaneBusy = false; }
+   }
+-  const hotLaneTimer = setInterval(() => { adoptHotNominations().catch(() => {}); }, 60_000);
++  // PUBLISH-FIX-102 (2026-09-21): the volatility watch writes its picks every 30 s; this lane adopted them every 60 s, so a coin that
++  // started running could stand outside the deep tape for up to a minute while the Judge, nominated from the same picks, refused it
++  // FEED_NOT_IN_TAPE_UNIVERSE (the top live refusal). Fifteen seconds closes the window to a quarter of what it was. The pass is cheap
++  // when there is nothing to do: with no stale slot and no unseen nominee it returns above before any REST call or universe rewrite,
++  // and `hotLaneBusy` still makes a slow pass skip rather than pile up.
++  const hotLaneTimer = setInterval(() => { adoptHotNominations().catch(() => {}); }, 15_000);
+ 
+   // ---- PUBLISH-FIX-52: startup universe deadline, retry, and the TAPE DOWN watchdog (tape/startup.js) ------------------
+   let universeLoaded = false;
+diff --git a/test/publish-fix-102-nothing-silent.test.js b/test/publish-fix-102-nothing-silent.test.js
+new file mode 100644
+index 0000000..84fdfa1
+--- /dev/null
++++ b/test/publish-fix-102-nothing-silent.test.js
+@@ -0,0 +1,63 @@
++// PUBLISH-FIX-102 (2026-09-21, owner directive: "Find everything that will stop us ... there's nothing you don't know so find
++// everything don't put anything off"). Two things the snake knew and never said, and one race it never needed to lose.
++//
++// 1. THE RACE. learning/volatility-watch.js writes its picks every 30 s. tape/run.js adopted them into the deep tape every 60 s.
++//    The Judge is nominated from the same picks, so for up to a minute it was told about a coin whose order book nobody had
++//    subscribed to yet, and refused it FEED_NOT_IN_TAPE_UNIVERSE — the top live refusal in the wall census of 2026-09-21. The
++//    refusal is self-healing (the next pass adopts it) but it costs the first minute of a run, which is the minute that matters.
++//
++// 2. THE CONTROL THAT ATE 28 BITES IN SILENCE. From the recorded episodes: CAGE appears 28 times between 2026-09-17T19:28Z and
++//    2026-09-19T13:24Z, and it is the ONLY restriction that has ever fired (KILL 0, OVERLOAD 0, FEED_IMPAIRED 0, DAILY_LOSS 0,
++//    PEAK_DRAWDOWN 0, PAPER_LIQUIDITY_UNCERTAIN 0, RECONCILIATION_REQUIRED 0, WRITER_LOST 0, DB_UNAVAILABLE 0). Each one was a
++//    look that passed every gate AND found a size — the closest the snake ever came to eating — and the owner was never told on
++//    any line that a control of his own was the reason. It is off now; it must never be silent again.
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import { readFileSync } from 'node:fs';
++import { createHash } from 'node:crypto';
++
++test('FIX102-1: the deep tape adopts on the watch\'s clock, not at four times its period', () => {
++  const src = readFileSync('tape/run.js', 'utf8');
++  const m = src.match(/const hotLaneTimer = setInterval\(\(\) => \{ adoptHotNominations\(\)\.catch\(\(\) => \{\}\); \}, ([0-9_]+)\);/);
++  assert.ok(m, 'the hot lane still runs on one plain interval');
++  const ms = Number(m[1].replace(/_/g, ''));
++  assert.equal(ms, 15_000, 'a quarter of the old 60 s, half the watch\'s own 30 s write period');
++  // and the pass must still be CHEAP when there is nothing to do, or four times the rate is four times the cost
++  assert.match(src, /if \(!stale\.length && !freshNominees\.length\) return;/, 'nothing stale and nothing new -> it returns before any REST call or universe rewrite');
++  assert.match(src, /if \(stopping \|\| hotLaneBusy\) return;/, 'a slow pass is skipped, never queued behind itself');
++});
++
++test('FIX102-2: tape/run.js is re-pinned for the change — a silent edit of it still fails', () => {
++  const digest = createHash('sha256').update(readFileSync('tape/run.js')).digest('hex');
++  const scope = readFileSync('test/social-4f-scope.test.js', 'utf8');
++  assert.ok(scope.includes(`'tape/run.js': '${digest}'`), 'the SCOPE-5 pin equals the working tree');
++});
++
++test('FIX102-3: a control that blocks a sized bite SAYS SO, in the owner\'s words, on its own line', () => {
++  const src = readFileSync('judge/judge.js', 'utf8');
++  assert.match(src, /RESTRICTION BLOCKED A BITE:/, 'the line exists');
++  assert.match(src, /This is a CONTROL, not the market: it stays until the owner clears it\./, 'and it says whose decision it was');
++  // it is logged where the restriction refuses a look that already has a size — not on an ordinary gate refusal
++  const at = src.indexOf('RESTRICTION BLOCKED A BITE:');
++  const before = src.slice(Math.max(0, at - 900), at);
++  assert.match(before, /if \(!admission\.ok\)/, 'at the admission refusal, after sizing');
++  assert.match(src, /counters\.restrictionRefusals = \(counters\.restrictionRefusals \?\? 0\) \+ 1/);
++  assert.match(src, /counters\.restrictionReasons/, 'and each reason is counted by name');
++});
++
++test('FIX102-4: the funnel line carries it too, so it is visible without reading every log line', () => {
++  const fly = readFileSync('fly.js', 'utf8');
++  assert.match(fly, /blocked by a CONTROL after sizing \$\{k\.restrictionRefusals \?\? 0\}/);
++  assert.match(fly, /k\.restrictionReasons/, 'named, most common first');
++});
++
++test('FIX102-5: nothing about authority moved — the control still refuses, it is only no longer silent', () => {
++  const src = readFileSync('judge/judge.js', 'utf8');
++  const at = src.indexOf('RESTRICTION BLOCKED A BITE:');
++  const after = src.slice(at, at + 900);
++  assert.match(after, /tracker\.decide\('ENTRY_REFUSED', now\(\)\)/, 'the look is still refused');
++  assert.match(after, /recordRefusal\(c, setupId, episodeId, 'ENTRY_REFUSED', admission\.reasons/, 'with the same reasons, recorded the same way');
++  assert.equal(/admission\.ok\s*=\s*true/.test(src), false, 'nothing overrides the admission');
++  const authority = readFileSync('execution/authority.js', 'utf8');
++  assert.match(authority, /if \(ctl\.kill \|\| s\.restrictions\.KILL\) reasons\.push\('KILL'\); if \(ctl\.cage\) reasons\.push\('CAGE'\);/, 'the control layer itself is untouched');
++});
+diff --git a/test/social-4f-scope.test.js b/test/social-4f-scope.test.js
+index dac9714..95b4bd9 100644
+--- a/test/social-4f-scope.test.js
++++ b/test/social-4f-scope.test.js
+@@ -338,7 +338,7 @@ test('SCOPE-8 (9/10). protected surfaces are byte-identical to 9c17372; authorit
+     //   (c) hotLane.tenureMs (a two-hour lease) -> hotLane.minHoldMs (a thrash guard), and retryable skips are no longer logged
+     //       every minute. Tests: test/publish-fix-96-nothing-stale-blocks.test.js (5; all fail on the previous code),
+     //       test/tape-hot-lane.test.js.
+-    'tape/run.js': '4e35ceac2bd000409c04154c41708929b0a15dcb6a22d6bfdf25fcdbb6f4f1f6',
++    'tape/run.js': '04e0adcecda472381e5d725f48e9fdda869cbba7dbc9f074ca4fa39b63cab3e3',
+     'rumor2/providers/x-official.js': '19d71247854289e5c8ee3c2f2ba0996ace78688c85bae88f160403cd2748ce0a',
+     'rumor2/social-time.js': '414f5101723cc8f77ae9c99a6477dbd68f1eeac6d856f015fca763894e9e2a98',
+     // PUBLISH-FIX-11 (2026-09-16): reconciler.hydrate reuses the replay's derived index entry for each target when the
+-- 
+2.43.0
+
