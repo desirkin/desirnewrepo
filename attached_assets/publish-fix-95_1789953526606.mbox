@@ -1,0 +1,147 @@
+From 8baed1a3ea2648e3a54d97634dae67dcd560f735 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 21 Sep 2026 01:18:40 +0000
+Subject: [PATCH] =?UTF-8?q?PUBLISH-FIX-95:=20the=20nomination=20floor=20?=
+ =?UTF-8?q?=E2=80=94=20the=20second=20door=20the=20runners=20were=20refuse?=
+ =?UTF-8?q?d=20at?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+FIX-94 got the movers ranked (95) and picked (AKE, DRV, SAGA, G, PUMP, SUI). tape/universe.js then re-verifies
+each nominee against the venue and refuses anything under config.wideeye.nominationFloorUsd before the hot lane
+may adopt it. At $2,000,000 a day that refused almost every runner the watch had just picked.
+
+Of the 77 Kraken USD pairs that ran >= 10% from the open on 2026-09-20, the liquid ones traded $180k-$264k a
+DAY (CTSI $192k, GNOT $228k, LAPTOP $264k, B2 $180k, MYX $220k); only DRV ($2.06M) could clear $2M.
+
+wideeye.nominationFloorUsd 2_000_000 -> 100_000 — the same line the runners study used for 'tradable at $500
+without moving the book' ($500 is 0.5% of a day's flow). ONE config value, audited in the SCOPE-5 config fence.
+
+Bounds unchanged: hot lane still 6 slots / 2 h tenure; deep universe still capped at 30 by volume (hot-lane
+verification runs against the UNCAPPED relaxed list, so an adopted runner is not then shed — checked); the
+Judge's frozen book-depth, protective-exit-at-depth and cost law on the live book remains the real gate. Dust
+stays out: SYND $9k/day, DUCK $2k, BLUE $1k are refused.
+
+Tests: publish-fix-94-watch-sees-runners 7/7 (FIX95-1 pins the real volumes and shows only DRV survived the old
+floor). wideeye 6/6 (below-floor fixture moved to $50k). Green: social-4f-scope 9, universe 9, tape-hot-lane 4,
+paper-runtime 8, judge-composition 4.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01RoFoPS22WFW1oUnbWzPayd
+---
+ cobra.config.json                             |  2 +-
+ docs/JUDGE-PAPER-AUDIT.md                     | 12 ++++++++++
+ .../publish-fix-94-watch-sees-runners.test.js | 24 +++++++++++++++++++
+ test/social-4f-scope.test.js                  |  7 ++++++
+ test/wideeye.test.js                          |  6 +++--
+ 5 files changed, 48 insertions(+), 3 deletions(-)
+
+diff --git a/cobra.config.json b/cobra.config.json
+index fd0994f..4e13d3c 100644
+--- a/cobra.config.json
++++ b/cobra.config.json
+@@ -23,7 +23,7 @@
+     "extensionCapPct": 3,
+     "minSamples": 60,
+     "rippleCooldownMin": 60,
+-    "nominationFloorUsd": 2000000,
++    "nominationFloorUsd": 100000,
+     "deepUniverseCap": 30
+   },
+   "gateway": {
+diff --git a/docs/JUDGE-PAPER-AUDIT.md b/docs/JUDGE-PAPER-AUDIT.md
+index 618febf..1f1bac6 100644
+--- a/docs/JUDGE-PAPER-AUDIT.md
++++ b/docs/JUDGE-PAPER-AUDIT.md
+@@ -291,6 +291,18 @@ nothing (heavy selling +0.06% at 15 minutes, strong buying +0.07%). A line someb
+   cost and sizing law on the live book, which is where liquidity is actually decided. Coins below the dust line (SYND at $9k/day, BLUE at
+   $1k/day) are not "missed": a $500 order would be the market. Tests: publish-fix-94-watch-sees-runners (6; 4 fail on the previous code),
+   learning-volatility-watch (4, updated to the new law and saying how).
++- `cobra.config.json` (PUBLISH-FIX-95, 2026-09-21; ONE value, audited in test/social-4f-scope.test.js SCOPE-5): `wideeye.
++  nominationFloorUsd` 2_000_000 -> 100_000. FIX-94 got the runners ranked and picked; tape/universe.js then re-verifies every
++  nominee against the venue and refused anything under this 24-hour dollar floor before the hot lane could adopt it, so the
++  movers were picked and then turned away at the second door. Of the 77 Kraken USD pairs that ran >= 10% on 2026-09-20, the
++  liquid ones traded $180k-$264k a DAY (CTSI $192k, GNOT $228k, LAPTOP $264k, B2 $180k); only DRV ($2.06M) could pass $2M.
++  $100k a day is the line the runners study used for "tradable at $500 without moving the book" ($500 = 0.5% of a day's flow).
++  Bounds unchanged: the hot lane still admits at most 6 (universeExpansion.hotLane.slots, 2 h tenure), the deep universe is
++  still capped at 30 by volume (the hot lane verifies against the UNCAPPED relaxed list, so an adopted runner is not then
++  shed), and the JUDGE's frozen book-depth / protective-exit-at-depth / cost law on the live book remains the real gate.
++  Tests: publish-fix-94-watch-sees-runners FIX95-1 (the six tradable runners clear it, SYND/DUCK/BLUE dust does not, and at
++  the old floor only DRV survived); wideeye nomination-merge fixture moved to a $50k below-floor nominee; social-4f-scope
++  SCOPE-5 carries the audited exception.
+ - `tools/gate-study-process.js` / `tools/gate-study-child.js`: the join runs in a child process every 30 minutes (90 s
+   after boot first); the main thread never reads the ledger; the lesson lands in `data/learning/gate-lessons/lesson.json`
+   (+ `state.json` with the proposal history). `fly.js` composes the reader as the Judge's port.
+diff --git a/test/publish-fix-94-watch-sees-runners.test.js b/test/publish-fix-94-watch-sees-runners.test.js
+index d3eeb3e..905be80 100644
+--- a/test/publish-fix-94-watch-sees-runners.test.js
++++ b/test/publish-fix-94-watch-sees-runners.test.js
+@@ -88,3 +88,27 @@ test('FIX94-6 (the shipped bars): the defaults are the $500-account floors, not
+   assert.equal(VOLATILITY_WATCH_DEFAULTS.maxStaleMin, 20); assert.equal(VOLATILITY_WATCH_DEFAULTS.sourceStaleMin, 5);
+   assert.equal(VOLATILITY_WATCH_DEFAULTS.picks, 6); assert.equal(VOLATILITY_WATCH_DEFAULTS.band, 12); assert.equal(VOLATILITY_WATCH_DEFAULTS.minRange1hPct, 0.8);
+ });
++
++// ---- PUBLISH-FIX-95 (2026-09-21): the nomination floor, the second door ------------------------------------------------------
++// FIX-94 got the runners RANKED and PICKED. tape/universe.js then re-verifies each nominee against the venue and refuses anything
++// under config.wideeye.nominationFloorUsd before the hot lane may adopt it. At $2,000,000 a day that refused almost every runner
++// the watch had just picked: of the 77 Kraken USD pairs that ran >= 10% on 2026-09-20, the liquid ones traded $180k-$264k a DAY
++// (CTSI $192k, GNOT $228k, LAPTOP $264k, B2 $180k) and only DRV ($2.06M) could pass. The floor is now $100k — the same line the
++// runners study used for "tradable at $500 without moving the book" — and the deep tape stays bounded by the hot lane's six slots.
++test('FIX95-1: tonight\'s runners clear the nomination floor and dust does not', async () => {
++  const { loadConfig } = await import('../lib/config.js');
++  const { mergeNominationsAndCap } = await import('../tape/universe.js');
++  const config = loadConfig();
++  assert.equal(config.wideeye.nominationFloorUsd, 100_000, 'the shipped floor');
++  // the venue's own 24h dollar volume for the coins the watch picked or ranked on 2026-09-20/21
++  const real = { DRV: 2_060_000, LAPTOP: 264_000, GNOT: 228_000, CTSI: 192_000, B2: 180_000, MYX: 220_000, SYND: 9_000, DUCK: 2_000, BLUE: 1_000 };
++  const assetPairs = Object.fromEntries(Object.keys(real).map((c) => [`${c}USD`, { wsname: `${c}/USD`, quote: 'USD', status: 'online' }]));
++  const tickers = Object.fromEntries(Object.entries(real).map(([c, usd]) => [`${c}USD`, { v: ['0', String(usd / 2)], p: ['2', '2'] }]));
++  const { pairs } = mergeNominationsAndCap([], Object.keys(real).map((coin) => ({ coin })), assetPairs, tickers, config);
++  const admitted = new Set(pairs.map((p) => p.coin));
++  for (const c of ['DRV', 'LAPTOP', 'GNOT', 'CTSI', 'B2', 'MYX']) assert.ok(admitted.has(c), `${c} ($${real[c]}/day) is tradable at $500 and must be verifiable`);
++  for (const c of ['SYND', 'DUCK', 'BLUE']) assert.ok(!admitted.has(c), `${c} ($${real[c]}/day) is dust — a $500 order would be the market`);
++  // and at the OLD floor only DRV survived: this is what the fix changed
++  const old = mergeNominationsAndCap([], Object.keys(real).map((coin) => ({ coin })), assetPairs, tickers, { ...config, wideeye: { ...config.wideeye, nominationFloorUsd: 2_000_000 } });
++  assert.deepEqual(old.pairs.map((p) => p.coin), ['DRV'], 'at $2M a day, 5 of these 6 tradable runners were refused at the venue check');
++});
+diff --git a/test/social-4f-scope.test.js b/test/social-4f-scope.test.js
+index bfb317e..0c66f26 100644
+--- a/test/social-4f-scope.test.js
++++ b/test/social-4f-scope.test.js
+@@ -168,6 +168,13 @@ test('SCOPE-5 (7). research configuration is closed: no wildcard, bounded caps,
+     if (k === 'universe') continue; // audited below
+     // PUBLISH-FIX-83 item 38 (2026-09-20): universeExpansion.resource.maxHeapMb 512 -> 3000, ONE value with the paper profile's overlay (config/paper-runtime.json) — the two used to disagree
+     if (k === 'universeExpansion') { const { hotLane, resource, ...rest } = current[k]; assert.deepEqual(hotLane, { slots: 6, tenureMs: 7_200_000 }); assert.deepEqual(resource, { ...baseline[k].resource, maxHeapMb: 3000 }); const { resource: _r, ...baseRest } = baseline[k]; assert.deepEqual(rest, baseRest, 'config.universeExpansion unchanged but for hotLane and the heap ceiling'); continue; }
++    // PUBLISH-FIX-95 (2026-09-21): wideeye.nominationFloorUsd 2_000_000 -> 100_000, ONE value. A nominated coin must clear this 24-hour
++    // dollar floor before tape/universe.js will verify it for the hot lane, so at $2M the VOLATILITY WATCH's movers were ranked, picked
++    // and then refused at the venue check: of the 77 Kraken USD pairs that ran >= 10% on 2026-09-20, the liquid ones sat at $180k-$264k
++    // a day (CTSI $192k, GNOT $228k, LAPTOP $264k, B2 $180k) and only DRV ($2.06M) could pass. $100k a day is the same line the runners
++    // study used for "tradable at $500 without moving the book" ($500 is 0.5% of a day's flow); the deep tape is still bounded by the
++    // hot lane's six slots, and the JUDGE's own book-depth and protective-exit-at-depth law on the live book remains the real gate.
++    if (k === 'wideeye') { const { nominationFloorUsd, ...rest } = current[k]; assert.equal(nominationFloorUsd, 100_000); const { nominationFloorUsd: _f, ...baseRest } = baseline[k]; assert.deepEqual(rest, baseRest, 'config.wideeye unchanged but for the nomination floor'); continue; }
+     assert.deepEqual(k === 'paper' ? { ...current[k], baseBalanceUsd: baseline.paper.baseBalanceUsd } : current[k], baseline[k], `config.${k} unchanged`);
+   }
+   assert.deepEqual(current.universe, [], 'PUBLISH-FIX-2: the legacy named-coin universe seed is removed — no hardcoded coins remain in any config');
+diff --git a/test/wideeye.test.js b/test/wideeye.test.js
+index 4a03299..7925fdd 100644
+--- a/test/wideeye.test.js
++++ b/test/wideeye.test.js
+@@ -70,10 +70,12 @@ test('nomination merge: relaxed floor, venue re-verification, cap 30, shed lowes
+     NOMCUSD: { wsname: 'NOMC/USD', quote: 'USD', status: 'online' },
+   };
+   const tick = (usd) => ({ v: ['0', String(usd / 2)], p: ['2', '2'] });
+-  const tickers = { NOMAUSD: tick(5e6), NOMBUSD: tick(1e6), NOMCUSD: tick(4e6) };
++  // PUBLISH-FIX-95 (2026-09-21): the relaxed nomination floor is now $100k a day (was $2M), so the fixture's "below the floor"
++  // nominee is $50k — dust for a $500 order. The law under test is unchanged: the VENUE's own volume decides, not the claim.
++  const tickers = { NOMAUSD: tick(5e6), NOMBUSD: tick(5e4), NOMCUSD: tick(4e6) };
+   const noms = [
+     { coin: 'NOMA', usdVol24h: 999e9 }, // claim is ignored; venue says $5M -> in
+-    { coin: 'NOMB' }, // venue says $1M -> below relaxed floor -> out
++    { coin: 'NOMB' }, // venue says $50k -> below the relaxed floor -> out
+     { coin: 'NOMC' }, // $4M -> in
+     { coin: 'MIN0' }, // already present -> no duplicate
+     { coin: 'GHOST' }, // not on venue -> out
+-- 
+2.43.0
+
