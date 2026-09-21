@@ -1,0 +1,293 @@
+From 577ec302e4ec7c4cabda99635af5142f294d4367 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 21 Sep 2026 02:32:34 +0000
+Subject: [PATCH] PUBLISH-FIX-100: twenty on the stage, not six - a new $500
+ account
+
+Owner directive 2026-09-21 (David): "I don't care if I lose that $500
+just start with a new $500. It's fake anyway... The answer is we don't
+need six. I don't care if it's written into the policy - we get to
+decide exactly what we're building."
+
+The funnel already started at ~600 (612 USD pairs swept, ~500 coins
+collected a minute, ~90 ranked, 20 offered, 20 order books carried by
+the tape after FIX-99). It then hit a wall of SIX:
+policy.universe.preparationSlots = 6 prepared six of the twenty, and
+execution/feed.js admitted six CANDIDATEs inside a twelve-symbol hot
+set (CANDIDATE_SLOTS_FULL / HOT_SET_FULL - the shape behind the live
+FEED_NOT_IN_TAPE_UNIVERSE refusals). composition.js prepares
+Math.min(preparationSlots, maxCandidates), so both had to move.
+
+  maxCandidates     6 -> 20
+  maxHotSet        12 -> 40
+  preparationSlots  6 -> 20
+
+A policy binding is immutable per account (ACCOUNT_POLICY_MISMATCH on
+any byte), so this IS a new account: paper-starting-styles-usd500-
+fee080-wide20, same $500, same 0.80% taker, same limits, same 10s
+proposal law, same six setups, same PAPER authority. The old account
+and its journal are untouched on disk - left behind, never reset.
+
+Frozen core UNCHANGED (judge/*.js, execution/*.js, watch/watch.js);
+judge/samples/policy.paper-reference.json stays at 6/12/6 so the
+divergence is this account's, not silent global drift.
+
+Fenced by test/publish-fix-100-twenty-on-the-stage.test.js (6) and the
+widened-universe carve-out in test/paper-e2e-pg.test.js. Recorded as
+docs/JUDGE-PAPER-AUDIT.md 4.37.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01RoFoPS22WFW1oUnbWzPayd
+---
+ .../judge.paper.starting-styles-fee080.json   | 10 +--
+ config/kraken-fee-snapshot.json               |  2 +-
+ config/paper-runtime.json                     |  2 +-
+ docs/JUDGE-PAPER-AUDIT.md                     | 27 +++++++
+ .../policy.paper-starting-styles-fee080.json  | 10 +--
+ test/paper-e2e-pg.test.js                     | 11 ++-
+ ...ublish-fix-100-twenty-on-the-stage.test.js | 77 +++++++++++++++++++
+ 7 files changed, 125 insertions(+), 14 deletions(-)
+ create mode 100644 test/publish-fix-100-twenty-on-the-stage.test.js
+
+diff --git a/config/judge.paper.starting-styles-fee080.json b/config/judge.paper.starting-styles-fee080.json
+index bf7ca5f..0189e22 100644
+--- a/config/judge.paper.starting-styles-fee080.json
++++ b/config/judge.paper.starting-styles-fee080.json
+@@ -1,6 +1,6 @@
+ {
+   "policyVersion": "judge-policy-2",
+-  "policyName": "paper-starting-styles-usd500-fee080",
++  "policyName": "paper-starting-styles-usd500-fee080-wide20",
+   "strategyVersion": "judge-strategy-starting-styles-edge-2",
+   "costModelVersion": "judge-cost-paper-reference-1",
+   "watchVersion": "watch-paper-edge-state-2",
+@@ -8,7 +8,7 @@
+   "venue": "kraken",
+   "quote": "USD",
+   "account": {
+-    "accountId": "paper-starting-styles-usd500-fee080",
++    "accountId": "paper-starting-styles-usd500-fee080-wide20",
+     "initialCapital": "500",
+     "compounding": "NONE"
+   },
+@@ -70,10 +70,10 @@
+       "JPY",
+       "EURR"
+     ],
+-    "maxCandidates": 6,
++    "maxCandidates": 20,
+     "maxResearch": 2,
+-    "maxHotSet": 12,
+-    "preparationSlots": 6
++    "maxHotSet": 40,
++    "preparationSlots": 20
+   },
+   "setups": {
+     "enabled": [
+diff --git a/config/kraken-fee-snapshot.json b/config/kraken-fee-snapshot.json
+index e754ff2..51d9daf 100644
+--- a/config/kraken-fee-snapshot.json
++++ b/config/kraken-fee-snapshot.json
+@@ -8,7 +8,7 @@
+  "asOf": "2026-09-20",
+  "verification": "PUBLIC_SCHEDULE_NOT_ACCOUNT",
+  "policyFile": "config/judge.paper.starting-styles-fee080.json",
+- "accountId": "paper-starting-styles-usd500-fee080",
++ "accountId": "paper-starting-styles-usd500-fee080-wide20",
+  "takerRateBound": "0.008",
+  "roundTripPct": 1.6,
+  "schedule": [
+diff --git a/config/paper-runtime.json b/config/paper-runtime.json
+index 088ad48..cc1e1fc 100644
+--- a/config/paper-runtime.json
++++ b/config/paper-runtime.json
+@@ -79,7 +79,7 @@
+    "model": { "desiredState": "REQUEST", "blockerPolicy": "PAID_GATE", "authority": "NONE", "credentialEnv": "ANTHROPIC_API_KEY", "budgetSource": "config/market-research.paper.json model.* (explicit USD caps; shipped 0 = blocked)" }
+   },
+   "judge": {
+-   "judge": { "desiredState": "ON", "blockerPolicy": "BLOCK_PAPER", "module": "judge/composition.js", "mode": "PAPER", "enableEnv": "JUDGE_ENABLED", "policyFile": "config/judge.paper.starting-styles-fee080.json", "accountId": "paper-starting-styles-usd500-fee080", "authority": "PAPER_SIMULATION_ONLY" },
++   "judge": { "desiredState": "ON", "blockerPolicy": "BLOCK_PAPER", "module": "judge/composition.js", "mode": "PAPER", "enableEnv": "JUDGE_ENABLED", "policyFile": "config/judge.paper.starting-styles-fee080.json", "accountId": "paper-starting-styles-usd500-fee080-wide20", "authority": "PAPER_SIMULATION_ONLY" },
+    "neverWatch": { "desiredState": "ON", "blockerPolicy": "DEGRADE", "module": "lib/never-watch.js", "env": "JUDGE_NEVER_WATCH", "bases": ["BTC", "ETH", "SOL", "LTC"], "note": "PUBLISH-FIX-76, owner directive 2026-09-19 (David: 'BTC and ETH should never even be seen by us'); PUBLISH-FIX-77 adds SOL and LTC: of the 28 cage-blocked bites graded 2026-09-19, every FLAT one was BTC / ETH / SOL / LTC — the big coins do not move 0.8% in 15 minutes, so they cannot pay the round trip: these bases are dropped from every Judge nomination source (universe, volatility watch, re-look, scout) before the Judge hears of them; the tape still carries their books as market context." },
+    "secondLook": { "desiredState": "ON", "blockerPolicy": "DEGRADE", "module": "judge/judge.js", "env": ["JUDGE_SECOND_LOOK_AFTER_MS", "JUDGE_SECOND_LOOK_MAX"], "afterMs": 180000, "maxLooks": 2, "note": "PUBLISH-FIX-79, owner directive 2026-09-19 (David: 'fix the thing that will make him miss the winners'): a look refused ONLY on buying-pressure gates (FI15, FI60_POSITIVE, RV60, the absorption priors) is retaken 3 minutes later at the same level if the coin still holds it — a fresh crossing, a fresh lock, every gate at full strength — up to 2 times per chain. No threshold moves. Set OFF for the baseline Judge." },
+    "gateLearning": { "desiredState": "ON", "blockerPolicy": "DEGRADE", "module": "learning/gate-lesson.js", "env": ["JUDGE_GATE_LEARNING", "JUDGE_GATE_MIN_SCORED", "JUDGE_GATE_MIN_COHORT", "JUDGE_GATE_MIN_FORWARD", "JUDGE_GATE_CONFIDENCE", "JUDGE_GATE_COST_HURDLE_PCT"], "minScored": 1000, "minCohort": 100, "minForward": 100, "confidence": 0.9, "note": "PUBLISH-FIX-82, owner directive 2026-09-19 (David: 'I want him to move the gate once it's tested enough — thousands and thousands of tests — without me having to say so'): the Judge's flow lines (FI15, FI60_POSITIVE, RV60, RECLAIM_FI15, FI15_FRESH_AT_D; judge/setups.js LEARNABLE_GATES, each inside a fixed band) are moved by his own scored looks: a move needs minScored scored looks on the gate, minCohort in the cohort it changes and bootstrap confidence the admitted looks' 15-minute return does not fall; it is PROPOSED, forward-tested on minForward looks scored after the proposal, then PUBLISHED; a published line that stops holding is REVERTED. One step per gate per cycle; the study runs every 30 minutes in a child process. Every move is one line in the log. Set OFF for the reference lines." },
+diff --git a/docs/JUDGE-PAPER-AUDIT.md b/docs/JUDGE-PAPER-AUDIT.md
+index ead4000..707e864 100644
+--- a/docs/JUDGE-PAPER-AUDIT.md
++++ b/docs/JUDGE-PAPER-AUDIT.md
+@@ -66,6 +66,33 @@ watch/watch.js   6f319a1ee72a2b43346b8d07f906bb3ca31566ca7e3be0180d57f551d8a1afe
+ all (49 files)   6016f931e15531e63a2f0d734137f914d9f8c0e2831902e4cc7806333fcd4127
+ ```
+ 
++### 4.37 Recorded change — 2026-09-21 PUBLISH-FIX-100: the stage widens from six to twenty and binds a NEW $500 account, `paper-starting-styles-usd500-fee080-wide20` (frozen core UNCHANGED; no digest moves)
++
++Not a frozen change: `judge/*.js`, `execution/*.js` and `watch/watch.js` are byte-identical to §4.35. What changed is the
++paper POLICY's universe block and, by the account law of §4.19/§4.22/§4.23/§4.36, the account it binds.
++`config/judge.paper.starting-styles-fee080.json` (and its reviewed twin `judge/samples/policy.paper-starting-styles-fee080.json`,
++still byte for byte the same file) now reads `maxCandidates 20` (was 6), `maxHotSet 40` (was 12), `preparationSlots 20`
++(was 6), `policyName` and `account.accountId` `paper-starting-styles-usd500-fee080-wide20`, `initialCapital` still `500`.
++`config/paper-runtime.json` groups.judge.judge.accountId and `config/kraken-fee-snapshot.json` name the same account, so
++`paper/profile.js` derives the matching `JUDGE_ACCOUNT`; the boot creates it ONCE under owner intent
++(`SERPENT_PAPER_INIT_ACCOUNT` = that name), and every earlier account — `paper-starting-styles-usd500-fee080` among them —
++and its journal stay untouched and readable. Nothing else moved: limits, execution controls (including the 10 s
++`proposalExpiryMs`), fees (`0.008` taker, the real Kraken Pro Tier-1 rate of §4.36), evaluation, capital, compounding, the
++six enabled setups and the PAPER authority are unchanged, and `judge/samples/policy.paper-reference.json` is left at
++6/12/6 so the divergence is this account's, never a silent global loosening.
++
++Reason — the owner's directive of 2026-09-21 ("I don't care if I lose that $500 just start with a new $500 ... The answer
++is we don't need six. I don't care if it's written into the policy"), and the measurement behind it. The funnel already
++starts at ~600: the wide eye sweeps 612 USD pairs, the broad collector carries ~500 coins a minute, the volatility watch
++ranks ~90 and offers 20 (PUBLISH-FIX-99), the tape's hot lane carries 20 live order books (PUBLISH-FIX-99 on the
++event-loop headroom measured after PUBLISH-FIX-97: utilisation 88-91% → 56-61%). The Judge then prepared
++`Math.min(preparationSlots, maxCandidates)` = SIX of those twenty, and `execution/feed.js` refused the rest with
++`CANDIDATE_SLOTS_FULL` / `HOT_SET_FULL` — the shape behind the live `FEED_NOT_IN_TAPE_UNIVERSE` refusals. Both numbers had
++to move or the change would have been cosmetic. Fenced by `test/publish-fix-100-twenty-on-the-stage.test.js` (6 tests:
++the effective stage is twenty, the account is new and not a reset, money/risk/authority unmoved, the two policy files
++still byte-identical, every file that names the account names the new one, the reference still at six) and by the
++widened-universe carve-out in `test/paper-e2e-pg.test.js`. Authority unchanged: PAPER_SIMULATION_ONLY, no orders.
++
+ ### 4.36 Audited change — 2026-09-20 PUBLISH-FIX-87: the paper fee is the REAL Kraken Pro Tier-1 taker (0.80% a side) for a $500 account; a new account; the fee-tier reader on the July 2026 schedule (frozen core UNCHANGED; no digest moves)
+ 
+ Two independent reviews (and the owner, every day) said the 0.40% reference was wrong for the account he will open. Checked
+diff --git a/judge/samples/policy.paper-starting-styles-fee080.json b/judge/samples/policy.paper-starting-styles-fee080.json
+index bf7ca5f..0189e22 100644
+--- a/judge/samples/policy.paper-starting-styles-fee080.json
++++ b/judge/samples/policy.paper-starting-styles-fee080.json
+@@ -1,6 +1,6 @@
+ {
+   "policyVersion": "judge-policy-2",
+-  "policyName": "paper-starting-styles-usd500-fee080",
++  "policyName": "paper-starting-styles-usd500-fee080-wide20",
+   "strategyVersion": "judge-strategy-starting-styles-edge-2",
+   "costModelVersion": "judge-cost-paper-reference-1",
+   "watchVersion": "watch-paper-edge-state-2",
+@@ -8,7 +8,7 @@
+   "venue": "kraken",
+   "quote": "USD",
+   "account": {
+-    "accountId": "paper-starting-styles-usd500-fee080",
++    "accountId": "paper-starting-styles-usd500-fee080-wide20",
+     "initialCapital": "500",
+     "compounding": "NONE"
+   },
+@@ -70,10 +70,10 @@
+       "JPY",
+       "EURR"
+     ],
+-    "maxCandidates": 6,
++    "maxCandidates": 20,
+     "maxResearch": 2,
+-    "maxHotSet": 12,
+-    "preparationSlots": 6
++    "maxHotSet": 40,
++    "preparationSlots": 20
+   },
+   "setups": {
+     "enabled": [
+diff --git a/test/paper-e2e-pg.test.js b/test/paper-e2e-pg.test.js
+index 3a72c39..0592c68 100644
+--- a/test/paper-e2e-pg.test.js
++++ b/test/paper-e2e-pg.test.js
+@@ -34,8 +34,15 @@ const PROFILE_POLICY_FILE = profileFileOf(PROFILE, 'judgePolicy'); assert.equal(
+ // taker reference; it IS its reviewed sample byte for byte; everything but the setups and the fee rate (limits, execution,
+ // universe, evaluation, account capital) is the reference's, and the fee differs from the reference ONLY in rate and scheduleId.
+ const profileRaw = readFileSync(PROFILE_POLICY_FILE, 'utf8'); assert.equal(profileRaw, readFileSync(path.resolve('judge/samples/policy.paper-starting-styles-fee080.json'), 'utf8'), 'the paper profile Judge policy IS the reviewed starting-styles-fee080 sample, byte for byte');
+-{ const ref = JSON.parse(readFileSync(path.resolve('judge/samples/policy.paper-reference.json'), 'utf8')); const cur = JSON.parse(profileRaw); for (const k of ['limits', 'execution', 'universe', 'evaluation', 'mode', 'venue', 'quote', 'costModelVersion']) assert.deepEqual(cur[k], ref[k], `${k} is the reference's`); assert.equal(cur.account.initialCapital, ref.account.initialCapital); assert.equal(cur.setups.enabled.length, 6);
+-  const { rate: rr, scheduleId: rs, ...refTaker } = ref.fees.taker; const { rate: cr, scheduleId: cs, ...curTaker } = cur.fees.taker; assert.deepEqual(curTaker, refTaker, 'the taker fee differs from the reference only in rate and scheduleId'); assert.equal(rr, '0.008'); assert.equal(cr, '0.008', 'PUBLISH-FIX-87: the real Kraken Pro Tier-1 taker for a $500 account'); assert.ok(cs !== rs && cs.length <= 300); assert.equal(cur.account.accountId, 'paper-starting-styles-usd500-fee080'); }
++{ const ref = JSON.parse(readFileSync(path.resolve('judge/samples/policy.paper-reference.json'), 'utf8')); const cur = JSON.parse(profileRaw); for (const k of ['limits', 'execution', 'evaluation', 'mode', 'venue', 'quote', 'costModelVersion']) assert.deepEqual(cur[k], ref[k], `${k} is the reference's`);
++  // PUBLISH-FIX-100 (owner directive 2026-09-21, David: "The answer is we don't need six. I don't care if it's written into the policy"):
++  // the stage widens with the funnel — the tape's hot lane carries 20 order books (PUBLISH-FIX-99), so the Judge prepares 20, the
++  // execution feed admits 20 candidates inside a 40-symbol hot set. This is a NEW policy binding and therefore a NEW $500 account
++  // (paper-starting-styles-usd500-fee080-wide20); the old account's history is untouched on disk. Everything else is still the reference's.
++  const WIDENED = { maxCandidates: 20, maxHotSet: 40, preparationSlots: 20 };
++  assert.deepEqual(cur.universe, { ...ref.universe, ...WIDENED }, 'the universe is the reference\'s except the three owner-widened stage sizes');
++  assert.deepEqual({ maxCandidates: ref.universe.maxCandidates, maxHotSet: ref.universe.maxHotSet, preparationSlots: ref.universe.preparationSlots }, { maxCandidates: 6, maxHotSet: 12, preparationSlots: 6 }, 'and the reference itself is UNCHANGED at six — the divergence is deliberate, not drift'); assert.equal(cur.account.initialCapital, ref.account.initialCapital); assert.equal(cur.setups.enabled.length, 6);
++  const { rate: rr, scheduleId: rs, ...refTaker } = ref.fees.taker; const { rate: cr, scheduleId: cs, ...curTaker } = cur.fees.taker; assert.deepEqual(curTaker, refTaker, 'the taker fee differs from the reference only in rate and scheduleId'); assert.equal(rr, '0.008'); assert.equal(cr, '0.008', 'PUBLISH-FIX-87: the real Kraken Pro Tier-1 taker for a $500 account'); assert.ok(cs !== rs && cs.length <= 300); assert.equal(cur.account.accountId, 'paper-starting-styles-usd500-fee080-wide20'); }
+ const paperRaw = JSON.parse(profileRaw); assert.equal(paperRaw.mode, 'PAPER'); assert.equal(paperRaw.execution.adapter, 'PAPER'); assert.equal(paperRaw.fees.taker.rate, '0.008', 'the reference fee is the Kraken Pro public Tier-1 0.80% taker (PUBLISH-FIX-87), the real fee for a $500 account buying at market; UNVERIFIED against the owner account');
+ const feeOver = { taker: { ...paperRaw.fees.taker, rate: '0.001', scheduleId: 'synthetic-test-fee' } };
+ const policyFor = (acct) => { const f = path.join(TEST_DATA, `${acct}.json`); writeFileSync(f, JSON.stringify({ ...paperRaw, policyName: acct, account: { ...paperRaw.account, accountId: acct }, fees: feeOver })); return { file: f, ...loadJudgePolicy(f) }; };
+diff --git a/test/publish-fix-100-twenty-on-the-stage.test.js b/test/publish-fix-100-twenty-on-the-stage.test.js
+new file mode 100644
+index 0000000..c74108d
+--- /dev/null
++++ b/test/publish-fix-100-twenty-on-the-stage.test.js
+@@ -0,0 +1,77 @@
++// PUBLISH-FIX-100 (2026-09-21, owner directive). David: "I don't care if I lose that $500 just start with a new $500 ... The answer
++// is we don't need six. I don't care if it's written into the policy — we get to decide exactly what we're building."
++//
++// The funnel already started at 600: the wide eye sweeps 612 USD pairs, the collector carries ~500 coins a minute, the volatility
++// watch ranks ~90 and offers 20 (PUBLISH-FIX-99), and the tape's hot lane carries 20 live order books (PUBLISH-FIX-99). Then it hit
++// a wall of SIX: policy.universe.preparationSlots = 6 meant the Judge prepared six of the twenty, and the execution feed admitted
++// six CANDIDATEs inside a twelve-symbol hot set — so nineteen of twenty runners reached the Judge's door and were told the room
++// was full (CANDIDATE_SLOTS_FULL / HOT_SET_FULL / FEED_NOT_IN_TAPE_UNIVERSE).
++//
++// A policy binding is immutable per account by law (judge/composition.js: ACCOUNT_POLICY_MISMATCH on any byte), so widening the
++// stage IS a new account. The owner gave that up deliberately: the account is renamed, the new one starts at the same $500, and
++// the old account's ledger is left untouched on disk. Nothing about risk, fees, limits or authority moves — only how many coins
++// may stand on the stage at once.
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import { readFileSync } from 'node:fs';
++import { loadJudgePolicy } from '../judge/policy.js';
++
++const LIVE_POLICY_FILE = 'config/judge.paper.starting-styles-fee080.json';
++const SAMPLE_FILE = 'judge/samples/policy.paper-starting-styles-fee080.json';
++const ACCOUNT = 'paper-starting-styles-usd500-fee080-wide20';
++
++test('FIX100-1: the Judge prepares twenty, not six — and the execution feed has room for all twenty', () => {
++  const { policy } = loadJudgePolicy(LIVE_POLICY_FILE);
++  assert.equal(policy.universe.preparationSlots, 20, 'as many prepared candidates as the tape carries order books');
++  assert.equal(policy.universe.maxCandidates, 20, 'the feed admits every one of them as a CANDIDATE (was 6: nineteen of twenty were refused)');
++  assert.equal(policy.universe.maxHotSet, 40, 'with room over the top for held positions, research and pins');
++  // judge/composition.js prepares Math.min(preparationSlots, maxCandidates) — the effective stage is the smaller of the two,
++  // so both had to move or the change would have been cosmetic.
++  assert.equal(Math.min(policy.universe.preparationSlots, policy.universe.maxCandidates), 20, 'the EFFECTIVE stage is twenty');
++  assert.ok(policy.universe.maxHotSet >= policy.universe.maxCandidates + policy.universe.maxResearch, 'the hot set can hold the candidates and the research at the same time');
++});
++
++test('FIX100-2: it is a NEW account at the same $500 — the old ledger is not reset, it is left behind', () => {
++  const { policy } = loadJudgePolicy(LIVE_POLICY_FILE);
++  assert.equal(policy.account.accountId, ACCOUNT);
++  assert.equal(policy.policyName, ACCOUNT, 'the account law compares policyName too (composition.js: policyVersion !== policy.policyName)');
++  assert.notEqual(policy.account.accountId, 'paper-starting-styles-usd500-fee080', 'the old account name is NOT reused — a changed binding under the old name is ACCOUNT_POLICY_MISMATCH, never a reset');
++  assert.equal(policy.account.initialCapital, '500');
++  assert.equal(policy.account.compounding, 'NONE');
++});
++
++test('FIX100-3: nothing about money, risk or authority moved with it', () => {
++  const { policy } = loadJudgePolicy(LIVE_POLICY_FILE);
++  assert.equal(policy.mode, 'PAPER');
++  assert.equal(policy.execution.adapter, 'PAPER');
++  assert.equal(policy.fees.taker.rate, '0.008', 'Kraken Pro public Tier-1 taker, 1.6% round trip — unchanged');
++  assert.equal(policy.execution.proposalExpiryMs, 10_000, 'the ten-second hypothesis law is unchanged');
++  assert.equal(policy.limits.maxSimultaneousAssetPositions, 1);
++  assert.equal(policy.limits.maxModelledRiskPerPositionFraction, 0.03);
++  assert.equal(policy.limits.dailyLossRestrictionFraction, 0.05);
++  assert.equal(policy.setups.enabled.length, 6, 'the six setups are the six SETUPS — that six was never the wall and does not move');
++});
++
++test('FIX100-4: the live policy file and its reviewed sample are still byte for byte the same file', () => {
++  assert.equal(readFileSync(LIVE_POLICY_FILE, 'utf8'), readFileSync(SAMPLE_FILE, 'utf8'));
++});
++
++test('FIX100-5: every place that names the account names the NEW one — a half-renamed account will not boot', () => {
++  // paper/profile.js derives JUDGE_ACCOUNT from config/paper-runtime.json; judge/composition.js refuses to open an account
++  // whose recorded binding differs by a byte. If the runtime still named the old account the boot would die at
++  // ACCOUNT_POLICY_MISMATCH, which reads like a crash and is really a typo.
++  const runtime = JSON.parse(readFileSync('config/paper-runtime.json', 'utf8'));
++  const lane = runtime.groups?.judge?.judge ?? null;
++  assert.ok(lane, 'the judge lane is in the runtime profile');
++  assert.equal(lane.accountId, ACCOUNT);
++  assert.ok(lane.policyFile.endsWith('judge.paper.starting-styles-fee080.json'));
++  const fee = JSON.parse(readFileSync('config/kraken-fee-snapshot.json', 'utf8'));
++  assert.equal(fee.accountId, ACCOUNT, 'the fee snapshot records which account the 0.80% schedule was bound to');
++});
++
++test('FIX100-6: the reference policy is UNCHANGED at six — the widening is this account, not a silent global loosening', () => {
++  const ref = JSON.parse(readFileSync('judge/samples/policy.paper-reference.json', 'utf8'));
++  assert.equal(ref.universe.preparationSlots, 6);
++  assert.equal(ref.universe.maxCandidates, 6);
++  assert.equal(ref.universe.maxHotSet, 12);
++});
+-- 
+2.43.0
+

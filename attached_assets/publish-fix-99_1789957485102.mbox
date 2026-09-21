@@ -1,0 +1,161 @@
+From 92d417177271b39caaba2595ffa16a5645a8dde7 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 21 Sep 2026 02:24:31 +0000
+Subject: [PATCH] PUBLISH-FIX-99: the order-book stage widens 6 -> 20 on
+ measured headroom
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Owner: 'why can't it have 600 not six honestly why can't you build that? ... let it start with 600 and
+the ones that make it through make it through.'
+
+He is right, and the six was never the width of the funnel. The wide eye already sweeps all 612 USD
+pairs and the collector streams 1-minute candles for the accepted catalog (~90 ranked per refresh).
+Six was the width of the LAST chamber only — the coins whose live L2 order book is streaming, which
+is required because that is what proves the protective exit at depth.
+
+And six was chosen when the process sat at 88-91% event-loop utilisation with 78% of its busy time
+inside fsync. PUBLISH-FIX-97 measured the same workload at 56-61%:
+  'CPU LOAD 60s: busy 33343ms idle 26657ms (event-loop utilization 56%)' — deployment ac337e1f
+So the headroom is measured, not assumed.
+
+- universeExpansion.hotLane.slots 6 -> 20 (audited in the SCOPE-5 config fence).
+- the watch offers picks 6 -> 20, band 12 -> 30.  had been sized to the JUDGE's six preparation
+  slots, but the watch feeds the TAPE and the Judge prepares its best six from what the tape carries —
+  tying them together meant the Judge chose six out of six. It now chooses the best six OF TWENTY,
+  ordered by FIX-98 fitness.
+- policy.universe.preparationSlots / maxCandidates UNCHANGED at 6. The account policy is immutable;
+  no policy byte was touched and the fee080 binding stands.
+
+The shipped-constant guards written earlier tonight (publish-fix-94 FIX94-6, publish-fix-96 FIX96-5,
+learning-volatility-watch VW-04) caught this change and were updated with the reason — which is
+exactly what they were written for.
+
+Green: social-4f-scope 9, learning-volatility-watch 4, publish-fix-94 7, publish-fix-96 5,
+publish-fix-98 6, tape-hot-lane 4, coin-dossier 3.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01RoFoPS22WFW1oUnbWzPayd
+---
+ cobra.config.json                                |  2 +-
+ docs/JUDGE-PAPER-AUDIT.md                        | 15 +++++++++++++++
+ learning/volatility-watch.js                     |  9 +++++++--
+ test/learning-volatility-watch.test.js           |  2 +-
+ test/publish-fix-94-watch-sees-runners.test.js   |  2 +-
+ test/publish-fix-96-nothing-stale-blocks.test.js |  2 +-
+ test/social-4f-scope.test.js                     |  2 +-
+ 7 files changed, 27 insertions(+), 7 deletions(-)
+
+diff --git a/cobra.config.json b/cobra.config.json
+index fc0cfa0..6ca4edb 100644
+--- a/cobra.config.json
++++ b/cobra.config.json
+@@ -56,7 +56,7 @@
+       "maxLoopLagMs": 1000,
+       "shedFraction": 0.15
+     },
+-    "hotLane": { "slots": 6, "minHoldMs": 600000 }
++    "hotLane": { "slots": 20, "minHoldMs": 600000 }
+   },
+   "tape": {
+     "wsUrl": "wss://ws.kraken.com/v2",
+diff --git a/docs/JUDGE-PAPER-AUDIT.md b/docs/JUDGE-PAPER-AUDIT.md
+index b2edec8..ead4000 100644
+--- a/docs/JUDGE-PAPER-AUDIT.md
++++ b/docs/JUDGE-PAPER-AUDIT.md
+@@ -350,6 +350,21 @@ nothing (heavy selling +0.06% at 15 minutes, strong buying +0.07%). A line someb
+   no scores anywhere the PUBLISH-FIX-96 order stands — oldest first — so nothing regresses. Held/pending exposure is still never
+   evicted; the Judge's law is untouched. Tests: publish-fix-98-fitness-funnel (6; 5 fail on the previous code). Green:
+   learning-volatility-watch, publish-fix-94, publish-fix-96, tape-hot-lane, coin-dossier, social-4f-scope, learning-mover-study.
++- `learning/volatility-watch.js` + `cobra.config.json` (PUBLISH-FIX-99, 2026-09-21; owner: "why can't it have 600 not six honestly
++  why can't you build that? ... let it start with 600 and the ones that make it through make it through"): the ORDER-BOOK stage
++  widens 6 -> 20 (universeExpansion.hotLane.slots, audited in the SCOPE-5 fence) and the watch offers 20 movers with a band of 30
++  (was 6 / 12). The screening stage was always the whole catalog — the wide eye sweeps all 612 USD pairs and the collector streams
++  1-minute candles for the accepted catalog, ~90 ranked per refresh — so "six" was never the width of the funnel, only of its last
++  chamber, where a live L2 order book is required because that is what proves the protective exit at depth. Six was chosen when the
++  process sat at 88-91% event-loop utilisation with 78% of its busy time inside fsync; PUBLISH-FIX-97 measured the same workload at
++  **56-61%** (`CPU LOAD 60s: busy 33343ms idle 26657ms`, deployment ac337e1f), so the headroom is real and measured rather than
++  assumed. `picks` was also mis-scoped: it had been sized to the JUDGE's six preparation slots, but the watch feeds the TAPE and the
++  Judge then prepares its best six from everything the tape carries — tying them together meant the Judge chose six out of six. It
++  now chooses the best six OF TWENTY, ordered by PUBLISH-FIX-98 fitness. policy.universe.preparationSlots / maxCandidates are
++  UNCHANGED at 6: the account policy is immutable (a byte change means a new account), and no policy byte was touched. Tests: the
++  shipped-constant guards in publish-fix-94 (FIX94-6), publish-fix-96 (FIX96-5) and learning-volatility-watch (VW-04) caught the
++  change and were updated with the reason — which is what they were written for. Green: social-4f-scope, learning-volatility-watch,
++  publish-fix-94, publish-fix-96, publish-fix-98, tape-hot-lane, coin-dossier.
+ - `tools/gate-study-process.js` / `tools/gate-study-child.js`: the join runs in a child process every 30 minutes (90 s
+   after boot first); the main thread never reads the ledger; the lesson lands in `data/learning/gate-lessons/lesson.json`
+   (+ `state.json` with the proposal history). `fly.js` composes the reader as the Judge's port.
+diff --git a/learning/volatility-watch.js b/learning/volatility-watch.js
+index 24c535a..c3ad50f 100644
+--- a/learning/volatility-watch.js
++++ b/learning/volatility-watch.js
+@@ -34,8 +34,13 @@ export const VOLATILITY_WATCH_SOURCE = 'VOLATILITY_WATCH';
+ //      run begin; the window is anchored at NOW (not at the coin's last candle), so an old spike on a coin that then went dead cannot rank.
+ // The Judge is unchanged and remains the real gate: every nominee still faces its frozen book-depth, cost and sizing law on the live book.
+ export const VOLATILITY_WATCH_DEFAULTS = Object.freeze({
+-  picks: 6,               // the Judge's preparation slots
+-  band: 12,               // a listed coin stays while it is still inside the top `band` (hysteresis against churn)
++  // PUBLISH-FIX-99 (2026-09-21, owner: "why can't it have 600 not six ... let it start with 600 and the ones that make it through make
++  // it through"). `picks` was sized to the JUDGE's six preparation slots, but the watch does not feed the Judge — it feeds the TAPE, and
++  // the Judge then prepares its best six from everything the tape carries. Tying the two together meant the Judge chose six out of six.
++  // The whole catalog is already screened on cheap 1-minute candles (612 swept, ~90 ranked); this is the width of the ORDER-BOOK stage,
++  // and after PUBLISH-FIX-97 took the process from 88-91% event-loop utilisation to 56-61% there is room for it.
++  picks: 20,              // movers offered to the tape's hot lane (it applies its own bound)
++  band: 30,               // a listed coin stays while it is still inside the top `band` (hysteresis against churn)
+   windowMin: 60,          // the hour that is ranked (anchored at now)
+   longWindowMin: 240,     // the four-hour range, reported beside it
+   minBars: 5,             // PUBLISH-FIX-94: minutes with a candle inside the window before a range is measured (was 30: blind to the first half hour of a run)
+diff --git a/test/learning-volatility-watch.test.js b/test/learning-volatility-watch.test.js
+index 31f0acc..871f633 100644
+--- a/test/learning-volatility-watch.test.js
++++ b/test/learning-volatility-watch.test.js
+@@ -95,7 +95,7 @@ test('VW-04. end to end: the source writes current.json, nominates with the entr
+     assert.equal(JSON.parse(readFileSync(volatilityFile(dir), 'utf8')).picks.length, 1);
+     assert.equal(watch.status().authority, 'NONE'); assert.equal(watch.status().counters.entered, 2); assert.equal(watch.status().counters.left, 1);
+     assert.throws(() => createVolatilityWatch({ seriesSource: () => null, dataDir: dir }), /coins\(\)/);
+-    assert.ok(VOLATILITY_WATCH_DEFAULTS.picks === 6); assert.equal(VOLATILITY_WATCH_DEFAULTS.minBars, 5, 'PUBLISH-FIX-94: five minutes inside the window are enough to see a run begin (was 30: blind to the first half hour)');
++    assert.ok(VOLATILITY_WATCH_DEFAULTS.picks === 20, 'PUBLISH-FIX-99: the order-book stage widened 6 -> 20 on measured headroom (event-loop utilisation 88-91% -> 56-61% after FIX-97); the Judge still prepares six, now the best six OF TWENTY'); assert.equal(VOLATILITY_WATCH_DEFAULTS.minBars, 5, 'PUBLISH-FIX-94: five minutes inside the window are enough to see a run begin (was 30: blind to the first half hour)');
+     // PUBLISH-FIX-71: a coin with 35 of the last 60 minutes on disk is ranked (was: not until 50)
+     { const r35 = rankByVolatility({ seriesSource: source({ ZZ: candles({ base: 3, rangePct: 6, usdPerMin: 50_000, minutes: 35 }) }), nowTs: NOW }); assert.deepEqual(r35.ranked.map((x) => x.coin), ['ZZ']); const r25 = rankByVolatility({ seriesSource: source({ ZZ: candles({ base: 3, rangePct: 6, usdPerMin: 50_000, minutes: 25 }) }), nowTs: NOW }); assert.deepEqual(r25.ranked.map((x) => x.coin), ['ZZ'], 'PUBLISH-FIX-94: 25 minutes rank too'); const r3 = rankByVolatility({ seriesSource: source({ ZZ: candles({ base: 3, rangePct: 6, usdPerMin: 50_000, minutes: 3 }) }), nowTs: NOW }); assert.deepEqual(r3.ranked, []); assert.equal(r3.skipped.thin, 1, 'under five minutes of candles is still too few'); }
+   } finally { rmSync(dir, { recursive: true, force: true }); }
+diff --git a/test/publish-fix-94-watch-sees-runners.test.js b/test/publish-fix-94-watch-sees-runners.test.js
+index 905be80..e3a7425 100644
+--- a/test/publish-fix-94-watch-sees-runners.test.js
++++ b/test/publish-fix-94-watch-sees-runners.test.js
+@@ -86,7 +86,7 @@ test('FIX94-6 (the shipped bars): the defaults are the $500-account floors, not
+   assert.equal(VOLATILITY_WATCH_DEFAULTS.minBars, 5); assert.equal(VOLATILITY_WATCH_DEFAULTS.minUsdVol1h, 10_000); assert.equal(VOLATILITY_WATCH_DEFAULTS.minTrades1h, 10);
+   assert.equal(VOLATILITY_WATCH_DEFAULTS.liquidityRefUsd, 10_000); assert.equal(VOLATILITY_WATCH_DEFAULTS.tradesRef1h, 60);
+   assert.equal(VOLATILITY_WATCH_DEFAULTS.maxStaleMin, 20); assert.equal(VOLATILITY_WATCH_DEFAULTS.sourceStaleMin, 5);
+-  assert.equal(VOLATILITY_WATCH_DEFAULTS.picks, 6); assert.equal(VOLATILITY_WATCH_DEFAULTS.band, 12); assert.equal(VOLATILITY_WATCH_DEFAULTS.minRange1hPct, 0.8);
++  assert.equal(VOLATILITY_WATCH_DEFAULTS.picks, 20, 'PUBLISH-FIX-99: the order-book stage widened 6 -> 20 on measured headroom (event-loop utilisation 88-91% -> 56-61% after FIX-97); the Judge still prepares six, now the best six OF TWENTY'); assert.equal(VOLATILITY_WATCH_DEFAULTS.band, 30); assert.equal(VOLATILITY_WATCH_DEFAULTS.minRange1hPct, 0.8);
+ });
+ 
+ // ---- PUBLISH-FIX-95 (2026-09-21): the nomination floor, the second door ------------------------------------------------------
+diff --git a/test/publish-fix-96-nothing-stale-blocks.test.js b/test/publish-fix-96-nothing-stale-blocks.test.js
+index 685357d..61d1fe2 100644
+--- a/test/publish-fix-96-nothing-stale-blocks.test.js
++++ b/test/publish-fix-96-nothing-stale-blocks.test.js
+@@ -67,5 +67,5 @@ test('FIX96-5: the shipped law — a thrash guard in minutes, and the config car
+   assert.deepEqual(HOT_LANE_DEFAULTS, { slots: 3, minHoldMs: 10 * MIN });
+   assert.equal('tenureMs' in HOT_LANE_DEFAULTS, false, 'the two-hour lease is gone, not renamed');
+   const { loadConfig } = await import('../lib/config.js');
+-  assert.deepEqual(loadConfig().universeExpansion.hotLane, { slots: 6, minHoldMs: 10 * MIN });
++  assert.deepEqual(loadConfig().universeExpansion.hotLane, { slots: 20, minHoldMs: 10 * MIN }); // PUBLISH-FIX-99: the order-book stage widened 6 -> 20 on measured headroom (event-loop utilisation 88-91% -> 56-61% after FIX-97); the Judge still prepares six, now the best six OF TWENTY
+ });
+diff --git a/test/social-4f-scope.test.js b/test/social-4f-scope.test.js
+index 01a4fa0..dac9714 100644
+--- a/test/social-4f-scope.test.js
++++ b/test/social-4f-scope.test.js
+@@ -167,7 +167,7 @@ test('SCOPE-5 (7). research configuration is closed: no wildcard, bounded caps,
+   for (const k of Object.keys(baseline)) {
+     if (k === 'universe') continue; // audited below
+     // PUBLISH-FIX-83 item 38 (2026-09-20): universeExpansion.resource.maxHeapMb 512 -> 3000, ONE value with the paper profile's overlay (config/paper-runtime.json) — the two used to disagree
+-    if (k === 'universeExpansion') { const { hotLane, resource, ...rest } = current[k]; assert.deepEqual(hotLane, { slots: 6, minHoldMs: 600_000 }); /* PUBLISH-FIX-96 (2026-09-21, owner: "nothing stale should just sit there blocking"): the two-hour tenure was a LEASE — a hot pair kept its deep-tape slot for two hours after its run ended, and was evicted only when someone else wanted it. A slot is now held only while the coin is still nominated; minHoldMs is a thrash guard. */ assert.deepEqual(resource, { ...baseline[k].resource, maxHeapMb: 3000 }); const { resource: _r, ...baseRest } = baseline[k]; assert.deepEqual(rest, baseRest, 'config.universeExpansion unchanged but for hotLane and the heap ceiling'); continue; }
++    if (k === 'universeExpansion') { const { hotLane, resource, ...rest } = current[k]; assert.deepEqual(hotLane, { slots: 20, minHoldMs: 600_000 }); /* PUBLISH-FIX-99 (2026-09-21): slots 6 -> 20. Six was chosen when the process sat at 88-91% event-loop utilisation, four fifths of its busy time inside fsync; PUBLISH-FIX-97 measured 56-61% on the same workload. The order-book stage widens to 20 so the Judge prepares its best six out of twenty rather than six out of six; the screening stage was always the whole 612-pair catalog on 1-minute candles. */ /* PUBLISH-FIX-96 (2026-09-21, owner: "nothing stale should just sit there blocking"): the two-hour tenure was a LEASE — a hot pair kept its deep-tape slot for two hours after its run ended, and was evicted only when someone else wanted it. A slot is now held only while the coin is still nominated; minHoldMs is a thrash guard. */ assert.deepEqual(resource, { ...baseline[k].resource, maxHeapMb: 3000 }); const { resource: _r, ...baseRest } = baseline[k]; assert.deepEqual(rest, baseRest, 'config.universeExpansion unchanged but for hotLane and the heap ceiling'); continue; }
+     // PUBLISH-FIX-95 (2026-09-21): wideeye.nominationFloorUsd 2_000_000 -> 100_000, ONE value. A nominated coin must clear this 24-hour
+     // dollar floor before tape/universe.js will verify it for the hot lane, so at $2M the VOLATILITY WATCH's movers were ranked, picked
+     // and then refused at the venue check: of the 77 Kraken USD pairs that ran >= 10% on 2026-09-20, the liquid ones sat at $180k-$264k
+-- 
+2.43.0
+
