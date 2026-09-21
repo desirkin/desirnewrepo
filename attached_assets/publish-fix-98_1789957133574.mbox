@@ -1,0 +1,290 @@
+From 53cd13d7017d1100ed45a4d76610ce72fe65335b Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 21 Sep 2026 02:18:47 +0000
+Subject: [PATCH] PUBLISH-FIX-98: an ever-living funnel ordered by fitness, not
+ a hot list
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Owner: 'There should absolutely not be a hot list. It should be an ever living funnel as things boil up
+to fit what we are trying to do ... the one that fits the most is the first one to be there. Work
+backwards if you need to.'
+
+Working backwards from the bite: the size ladder sizes nothing unless the scenario target sits about
+(roundTrip + stop) x REWARD_RISK_MIN above entry — ~5.5% on this account. The wall census showed that
+is precisely where every qualified look died: 11,823 looks in four days, 71 passed every gate, 28 were
+killed by the CAGE, 38 refused at sizing. The decisive one, ARB on 09-20 16:27, carried relative volume
+23.587 and buying pressure 0.995 and was refused because its atrPct was 0.318% — a third of one percent
+against a 1.6% round trip. It could not produce the target however violently it moved.
+
+Raw range said which coin moved MOST. It never said which coin could CLEAR THE HURDLE.
+
+- fitness = window range / hurdlePct (5.5), on every ranked row and carried on both nomination shapes.
+- the ranked score is fitness discounted by liquidity and print density (unchanged: discounts, not vetoes).
+- fresh nominees are planned FITTEST-FIRST, so the best coin takes the first free slot.
+- a full lane: the WEAKEST eligible incumbent yields, and only to a nominee that fits better. A worse
+  nominee is skipped FITS_LESS_THAN_EVERY_INCUMBENT and retried, because fit changes minute to minute.
+- an adopted pair remembers the fit it entered with; an unscored incumbent (dropped by the watch) ranks
+  below any scored one, so it is the first to go.
+- with no scores anywhere the FIX-96 order stands (oldest first): nothing regresses.
+
+Held/pending exposure is never evicted. The Judge's law is untouched; authority NONE throughout.
+
+Tests: publish-fix-98-fitness-funnel 6/6, five of six fail on the previous code. Green:
+learning-volatility-watch 4, publish-fix-94 7, publish-fix-96 5, tape-hot-lane 4, coin-dossier 3,
+social-4f-scope 9, learning-mover-study 7.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01RoFoPS22WFW1oUnbWzPayd
+---
+ docs/JUDGE-PAPER-AUDIT.md                  | 16 ++++
+ learning/volatility-watch.js               | 20 ++++-
+ tape/hot-lane.js                           | 25 ++++--
+ test/publish-fix-98-fitness-funnel.test.js | 95 ++++++++++++++++++++++
+ 4 files changed, 147 insertions(+), 9 deletions(-)
+ create mode 100644 test/publish-fix-98-fitness-funnel.test.js
+
+diff --git a/docs/JUDGE-PAPER-AUDIT.md b/docs/JUDGE-PAPER-AUDIT.md
+index 49e18fe..b2edec8 100644
+--- a/docs/JUDGE-PAPER-AUDIT.md
++++ b/docs/JUDGE-PAPER-AUDIT.md
+@@ -334,6 +334,22 @@ nothing (heavy selling +0.06% at 15 minutes, strong buying +0.07%). A line someb
+   clean stop. The 10-second proposal law is NOT relaxed: the fix is the disk, not the deadline, and no policy byte changed.
+   Tests: publish-fix-97-io-lane-on (3; FIX97-1 fails on the previous profile). Green: paper-runtime, write-behind,
+   tape-store-write-behind, tape-startup, social-4f-scope.
++- `learning/volatility-watch.js` + `tape/hot-lane.js` (PUBLISH-FIX-98, 2026-09-21; owner: "There should absolutely not be a hot list.
++  It should be an ever living funnel as things boil up to fit what we're trying to do ... the one that fits the most is the first one
++  to be there. Work backwards."): the funnel is ordered by FITNESS, and a slot belongs to the fittest coin alive rather than to
++  whoever got there first. Working backwards from the bite: judge/size-ladder.js sizes nothing unless the scenario target sits about
++  (roundTrip + stop) x REWARD_RISK_MIN above entry — ~5.5% on this account. The wall census (claude/serpent-wall-census-2026-09-21.md)
++  showed that is exactly where every qualified look died: of 11,823 looks in four days, 71 passed every gate, 28 were killed by the
++  CAGE and 38 refused at sizing; the decisive one (ARB, 09-20 16:27) carried rv60 23.587 and fi15 0.995 and was refused because its
++  atrPct was 0.318% — a third of one percent against a 1.6% round trip. Raw range said which coin moved MOST; it never said which
++  could CLEAR THE HURDLE. Now: `fitness` = window range / hurdlePct (5.5), reported on every ranked row and carried on both nomination
++  shapes; the ranked `score` is fitness discounted by the liquidity and print-density weights (unchanged, still discounts not vetoes);
++  fresh nominees are planned fittest-first so the best coin takes the first free slot; when the lane is full the WEAKEST eligible
++  incumbent yields and only to a nominee that actually fits better (`FITS_LESS_THAN_EVERY_INCUMBENT`, retryable — fit changes minute to
++  minute); an adopted pair remembers `hotScore`, and an unscored incumbent (one the watch has dropped) ranks below any scored one. With
++  no scores anywhere the PUBLISH-FIX-96 order stands — oldest first — so nothing regresses. Held/pending exposure is still never
++  evicted; the Judge's law is untouched. Tests: publish-fix-98-fitness-funnel (6; 5 fail on the previous code). Green:
++  learning-volatility-watch, publish-fix-94, publish-fix-96, tape-hot-lane, coin-dossier, social-4f-scope, learning-mover-study.
+ - `tools/gate-study-process.js` / `tools/gate-study-child.js`: the join runs in a child process every 30 minutes (90 s
+   after boot first); the main thread never reads the ledger; the lesson lands in `data/learning/gate-lessons/lesson.json`
+   (+ `state.json` with the proposal history). `fly.js` composes the reader as the Judge's port.
+diff --git a/learning/volatility-watch.js b/learning/volatility-watch.js
+index 0d1ceab..24c535a 100644
+--- a/learning/volatility-watch.js
++++ b/learning/volatility-watch.js
+@@ -45,6 +45,14 @@ export const VOLATILITY_WATCH_DEFAULTS = Object.freeze({
+   tradesRef1h: 60,        // PUBLISH-FIX-94: the print-density weight min(1, trades / ref) — a print a minute across the hour weighs 1 (was 120)
+   minRange1hPct: 0.8,     // below this the window did not move enough to matter against fees; the list may be shorter than `picks`
+   maxStaleMin: 20,        // PUBLISH-FIX-94: a coin must have printed within this many minutes to be ranked NOW (was 5, which read quiet coins as dead feeds)
++  // PUBLISH-FIX-98 (2026-09-21, owner: "an ever living funnel as things boil up to fit what we're trying to do ... the one that fits
++  // the most is the first one to be there"). Working backwards from the bite: the Judge sizes nothing unless the scenario target sits
++  // roughly (roundTrip + stop) x REWARD_RISK_MIN above entry — about 5.5% on this account (1.6% round trip, 0.6% stop, RR 1.5). Raw
++  // range said which coin moved MOST; it never said which coin could CLEAR THE HURDLE. The census of 2026-09-21 showed why that
++  // matters: ARB passed every gate on 23.6x relative volume and 0.99 buying pressure and was refused at sizing because its ATR was
++  // 0.318% — a third of one percent against a 1.6% fee. fitness = the window's range as a MULTIPLE of that hurdle, so a coin is
++  // ranked by whether it can pay, not by whether it wiggled.
++  hurdlePct: 5.5,
+   sourceStaleMin: 5,      // PUBLISH-FIX-94: the SOURCE is stale when its newest receipt across every coin is older than this; then nothing is ranked
+ });
+ const MIN = 60_000;
+@@ -96,8 +104,12 @@ export function rankByVolatility({ seriesSource, nowTs, cfg = VOLATILITY_WATCH_D
+     const liquidityWeight = Math.min(1, Math.max(0, Math.log10(h.usdVol / (cfg.liquidityRefUsd ?? VOLATILITY_WATCH_DEFAULTS.liquidityRefUsd)) / 2)); const densityWeight = h.trades === null ? 1 : Math.min(1, h.trades / (cfg.tradesRef1h ?? VOLATILITY_WATCH_DEFAULTS.tradesRef1h));
+     // PUBLISH-FIX-94: the weights are DISCOUNTS, never a veto — each can at most halve the score. With a plain product a 22% run on $60k in
+     // the hour (weight 0.39) scored below a 3% wobble on $3M (weight 1); the dust line above is the veto, the weights only order what is above it.
+-    const score = h.rangePct * (0.5 + 0.5 * liquidityWeight) * (0.5 + 0.5 * densityWeight);
+-    out.push({ coin, symbol: `${coin}/USD`, range1hPct: round3(h.rangePct), score: round3(score), liquidityWeight: round3(liquidityWeight), densityWeight: round3(densityWeight), trades1h: h.trades, ret1hPct: round3(h.retPct), usdVol1h: Math.round(h.usdVol), range4hPct: l && !l.stale && !l.tooFew ? round3(l.rangePct) : null, lastClose: h.lastClose, lastOpenSec: h.lastOpenSec });
++    // PUBLISH-FIX-98: the ranked quantity is FITNESS — the range as a multiple of the cost hurdle the Judge's sizing must clear — so the
++    // funnel is ordered by what can pay, not by what moved. A coin under 1.0 cannot produce the target however violently it wiggles.
++    const hurdlePct = Number.isFinite(cfg.hurdlePct) && cfg.hurdlePct > 0 ? cfg.hurdlePct : VOLATILITY_WATCH_DEFAULTS.hurdlePct;
++    const fitness = round3(h.rangePct / hurdlePct);
++    const score = (h.rangePct / hurdlePct) * (0.5 + 0.5 * liquidityWeight) * (0.5 + 0.5 * densityWeight);
++    out.push({ coin, symbol: `${coin}/USD`, range1hPct: round3(h.rangePct), fitness, hurdlePct, score: round3(score), liquidityWeight: round3(liquidityWeight), densityWeight: round3(densityWeight), trades1h: h.trades, ret1hPct: round3(h.retPct), usdVol1h: Math.round(h.usdVol), range4hPct: l && !l.stale && !l.tooFew ? round3(l.rangePct) : null, lastClose: h.lastClose, lastOpenSec: h.lastOpenSec });
+   }
+   out.sort((a, b) => b.score - a.score || b.range1hPct - a.range1hPct || b.usdVol1h - a.usdVol1h || a.coin.localeCompare(b.coin));
+   return { ranked: out, skipped: { stale, thin, quiet, streamStale: false, newestReceivedTs: newestReceived } };
+@@ -136,7 +148,7 @@ export function createVolatilityWatch({ seriesSource, dataDir, clock = () => Dat
+     return current;
+   }
+   // the Judge's nomination shape (judge/composition.js nominate()): the ENTRY clock ranks, the affirmation keeps the TTL alive
+-  const nominations = () => current.picks.map((p) => ({ symbol: p.symbol, assetId: p.coin, source: VOLATILITY_WATCH_SOURCE, nominationKnownAtTs: p.sinceTs, nominationLastSeenTs: p.affirmedTs ?? p.sinceTs }));
++  const nominations = () => current.picks.map((p) => ({ symbol: p.symbol, assetId: p.coin, source: VOLATILITY_WATCH_SOURCE, nominationKnownAtTs: p.sinceTs, nominationLastSeenTs: p.affirmedTs ?? p.sinceTs, score: p.score ?? null, fitness: p.fitness ?? null })); // PUBLISH-FIX-98: the fit travels with the nomination
+   const line = () => `VOLATILITY WATCH: ${current.skipped?.streamStale ? 'SOURCE STALE — nothing ranked (newest receipt ' + new Date(current.skipped.newestReceivedTs).toISOString() + ')' : current.picks.length ? current.picks.map((p) => `${p.coin} ${p.range1hPct}%`).join(', ') : 'no coin moved enough this hour'} (ranked ${current.ranked}${current.skipped ? `; quiet-now ${current.skipped.stale}, thin ${current.skipped.thin}, no-range ${current.skipped.quiet}` : ''})`;
+   return { version: VOLATILITY_WATCH_VERSION, refresh, nominations, line, current: () => current, status: () => ({ version: VOLATILITY_WATCH_VERSION, picks: current.picks.slice(), ranked: current.ranked, skipped: current.skipped, counters: { ...counters }, config: { ...cfg }, authority: 'NONE' }) };
+ }
+@@ -146,6 +158,6 @@ export function readVolatilityWatchNow({ dataDir, nowTs = Date.now(), maxAgeMin
+   try {
+     const f = volatilityFile(dataDir); if (!existsSync(f)) return [];
+     const raw = JSON.parse(readFileSync(f, 'utf8')); if (!raw || raw.version !== VOLATILITY_WATCH_VERSION || !Number.isSafeInteger(raw.ts) || nowTs - raw.ts > maxAgeMin * MIN || !Array.isArray(raw.picks)) return [];
+-    return raw.picks.filter((p) => p && typeof p.coin === 'string' && Number.isSafeInteger(p.sinceTs)).map((p) => ({ coin: p.coin, ts: new Date(p.sinceTs).toISOString(), cause: `VOLATILITY_WATCH ${p.range1hPct}% 1h` }));
++    return raw.picks.filter((p) => p && typeof p.coin === 'string' && Number.isSafeInteger(p.sinceTs)).map((p) => ({ coin: p.coin, ts: new Date(p.sinceTs).toISOString(), cause: `VOLATILITY_WATCH ${p.range1hPct}% 1h (fit ${p.fitness ?? '?'}x)`, score: p.score ?? null, fitness: p.fitness ?? null })); // PUBLISH-FIX-98
+   } catch { return []; }
+ }
+diff --git a/tape/hot-lane.js b/tape/hot-lane.js
+index 1612a48..71b36aa 100644
+--- a/tape/hot-lane.js
++++ b/tape/hot-lane.js
+@@ -8,7 +8,7 @@
+ // sees the newcomer at once and — stamped at first sight — it preempts the oldest preparation tenant (judge/readiness.js
+ // law, unchanged). Held / pending exposure is never evicted; the resource law still applies to hot pairs like any other.
+ // Authority NONE: this widens what is WATCHED, never what may be traded.
+-export const HOT_LANE_VERSION = 'tape-hot-lane-2';
++export const HOT_LANE_VERSION = 'tape-hot-lane-3';
+ // PUBLISH-FIX-96 (2026-09-21, owner directive: "nothing stale should just sit there blocking"). Two rules in this planner held a
+ // deep-tape slot against a coin that had earned it and no longer did:
+ //   1. A hot pair was evicted ONLY to make room for a new nominee. With nothing new arriving, a coin whose run ended an hour ago
+@@ -32,6 +32,12 @@ export function planHotAdoption({ nominations = [], carried = [], verified = [],
+   const carriedByCoin = new Map(carried.map((p) => [p.coin, p]));
+   const hotNow = carried.filter((p) => p.hot === true).sort((a, b) => (a.hotSinceTs ?? 0) - (b.hotSinceTs ?? 0)); // oldest first
+   const nominatedNow = new Set(nominations.filter((n) => n && typeof n.coin === 'string').map((n) => n.coin));
++  // PUBLISH-FIX-98 (2026-09-21, owner: "an ever living funnel ... the one that fits the most is the first one to be there"): each
++  // nomination carries the watch's FITNESS score (the window's range as a multiple of the cost hurdle the Judge's sizing must clear).
++  // A slot is not a place in a queue — it belongs to the fittest coin alive, and a fitter nominee DISPLACES a weaker incumbent rather
++  // than waiting for one to age out. Without a score on either side the old oldest-first order stands, so nothing regresses.
++  const fitOf = new Map(); for (const n of nominations) if (n && typeof n.coin === 'string' && Number.isFinite(n.score)) fitOf.set(n.coin, n.score);
++  const scoreOfPair = (p) => (fitOf.has(p.coin) ? fitOf.get(p.coin) : Number.isFinite(p.hotScore) ? p.hotScore : null);
+   // PUBLISH-FIX-96 rule 1: release every hot pair that is no longer nominated, before anyone asks for its slot
+   for (const p of hotNow) {
+     if (pinned.has(p.symbol)) continue;                         // held / pending exposure never yields
+@@ -41,7 +47,8 @@ export function planHotAdoption({ nominations = [], carried = [], verified = [],
+     evict.push(p.symbol); nextSeen.delete(p.coin);
+     released.push({ coin: p.coin, symbol: p.symbol, reason: 'NO_LONGER_NOMINATED', heldMs });
+   }
+-  const fresh = nominations.filter((n) => n && typeof n.coin === 'string' && !seen.has(n.coin));
++  const fresh = nominations.filter((n) => n && typeof n.coin === 'string' && !seen.has(n.coin))
++    .sort((a, b) => (Number.isFinite(b.score) ? b.score : -Infinity) - (Number.isFinite(a.score) ? a.score : -Infinity)); // PUBLISH-FIX-98: fittest first, so the best coin takes the first free slot
+   // PUBLISH-FIX-83 (full review item 15): `seen` used to be "seen once, refused forever" — a mover nominated while the hot slots were
+   // full was never retried, and an evicted coin could never come back. Now a HOT_LANE_FULL skip is NOT remembered (retried on the
+   // next pass), and an evicted coin leaves `seen` so a later nomination can re-adopt it. NOT_VERIFIED and ALREADY_CARRIED stay remembered.
+@@ -54,13 +61,21 @@ export function planHotAdoption({ nominations = [], carried = [], verified = [],
+     if (!v) { skipped.push({ coin: n.coin, reason: 'NOT_VERIFIED_BY_VENUE_SELECTION', retry: true }); continue; }
+     const hotCount = hotNow.length + adopt.length - evict.length;
+     if (hotCount >= slots) {
+-      // PUBLISH-FIX-96 rule 2: the victim is the oldest hot pair past the thrash guard (was: past a two-hour lease)
+-      const victim = hotNow.find((p) => !pinned.has(p.symbol) && !evict.includes(p.symbol) && nowTs - (p.hotSinceTs ?? 0) >= minHoldMs);
++      const eligible = hotNow.filter((p) => !pinned.has(p.symbol) && !evict.includes(p.symbol) && nowTs - (p.hotSinceTs ?? 0) >= minHoldMs);
++      // PUBLISH-FIX-98: the WEAKEST eligible incumbent yields, and only to a nominee that actually fits better. A pair whose fit is
++      // unknown is weaker than any scored one (it is no longer on the watch's list at all). With no scores anywhere this is the
++      // PUBLISH-FIX-96 order — oldest first — unchanged.
++      const nomScore = Number.isFinite(n.score) ? n.score : null;
++      const ranked = [...eligible].sort((a, b) => { const sa = scoreOfPair(a); const sb = scoreOfPair(b); if (sa === null && sb === null) return (a.hotSinceTs ?? 0) - (b.hotSinceTs ?? 0); if (sa === null) return -1; if (sb === null) return 1; return sa - sb; });
++      const victim = ranked[0];
+       if (!victim) { skipped.push({ coin: n.coin, reason: 'HOT_LANE_FULL', retry: true }); continue; }
++      const victimScore = scoreOfPair(victim);
++      if (nomScore !== null && victimScore !== null && nomScore <= victimScore) { skipped.push({ coin: n.coin, reason: 'FITS_LESS_THAN_EVERY_INCUMBENT', retry: true }); continue; }
+       evict.push(victim.symbol); nextSeen.delete(victim.coin);
++      released.push({ coin: victim.coin, symbol: victim.symbol, reason: 'DISPLACED_BY_BETTER_FIT', heldMs: nowTs - (victim.hotSinceTs ?? 0), by: n.coin, fit: nomScore, wasFit: victimScore });
+     }
+     nextSeen.add(n.coin);
+-    adopt.push({ ...v, hot: true, hotSinceTs: nowTs, cause: typeof n.cause === 'string' ? n.cause.slice(0, 80) : 'WIDE_EYE_NOMINATION', nominatedTs: n.ts ?? null });
++    adopt.push({ ...v, hot: true, hotSinceTs: nowTs, hotScore: Number.isFinite(n.score) ? n.score : null, cause: typeof n.cause === 'string' ? n.cause.slice(0, 80) : 'WIDE_EYE_NOMINATION', nominatedTs: n.ts ?? null }); // PUBLISH-FIX-98: the fit it entered with
+   }
+   return { version: HOT_LANE_VERSION, adopt, evict, released, skipped, seen: nextSeen };
+ }
+diff --git a/test/publish-fix-98-fitness-funnel.test.js b/test/publish-fix-98-fitness-funnel.test.js
+new file mode 100644
+index 0000000..cc3fae2
+--- /dev/null
++++ b/test/publish-fix-98-fitness-funnel.test.js
+@@ -0,0 +1,95 @@
++// PUBLISH-FIX-98 (2026-09-21, owner directive): "There should absolutely not be a hot list. It should be an ever living funnel as
++// things boil up to fit what we're trying to do ... the one that fits the most is the first one to be there. Work backwards."
++//
++// Working backwards from the bite: judge/size-ladder.js sizes nothing unless the scenario target sits about
++// (roundTrip + stop) x REWARD_RISK_MIN above entry — ~5.5% on this account (1.6% round trip, 0.6% stop, RR 1.5). The wall census
++// of 2026-09-21 proved that is where every qualified look died: 71 looks passed every gate in four days, 38 were refused at sizing,
++// and the decisive one (ARB, 2026-09-20 16:27) had relative volume 23.6x and buying pressure 0.99 but an ATR of 0.318% — a third
++// of one percent against a 1.6% fee. It could not produce the target however violently it moved.
++//
++// So the funnel is ordered by FITNESS — the window's range as a multiple of that hurdle — not by raw range; and a slot is not a
++// place in a queue: the fittest coin alive holds it, and a fitter nominee DISPLACES a weaker incumbent instead of waiting.
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import { rankByVolatility, VOLATILITY_WATCH_DEFAULTS } from '../learning/volatility-watch.js';
++import { planHotAdoption } from '../tape/hot-lane.js';
++
++const MIN = 60_000; const NOW = Date.UTC(2026, 8, 21, 3, 0, 0);
++function coinSeries(prints, { received = NOW } = {}) {
++  const rows = prints.map(([ago, px, usd, n = 1]) => ({ c: [Math.floor((NOW - ago * MIN) / MIN) * 60, px, px, px, px, usd / px], n })).sort((a, b) => a.c[0] - b.c[0]);
++  return { symbol: 'X', intervalSec: 60, retrievedTsMs: received, candles: rows.map((r) => r.c), trades: rows.map((r) => r.n) };
++}
++const src = (map) => Object.assign((coin) => map[coin] ?? null, { coins: () => Object.keys(map) });
++// a coin that ranges `pct` across the hour on `usdPerMin` dollars a minute, printing every minute
++function mover(pct, usdPerMin, { prints = 4 } = {}) {
++  const out = []; const lo = 1; const hi = 1 + pct / 100;
++  for (let i = 59; i >= 0; i -= 1) out.push([i, i > 30 ? lo : hi, usdPerMin, prints]);
++  return coinSeries(out);
++}
++const pair = (coin, extra = {}) => ({ coin, symbol: `${coin}/USD`, major: false, depth: 25, usdVol24h: 10_000_000, ...extra });
++const hot = (coin, sinceMsAgo, extra = {}) => pair(coin, { hot: true, hotSinceTs: NOW - sinceMsAgo, ...extra });
++
++test('FIX98-1: the funnel ranks by FITNESS to the cost hurdle — a coin that cannot clear it is reported under 1.0 however hard it moved', () => {
++  const map = {
++    RUNNER: mover(11, 4_000),   // 11% in the hour on $240k: two hurdles' worth
++    ARBLIKE: mover(0.32, 60_000), // the census coin: a third of a percent on $3.6M — it cannot pay the fee
++    MID: mover(5.5, 20_000),     // exactly one hurdle
++  };
++  const { ranked } = rankByVolatility({ seriesSource: src(map), nowTs: NOW });
++  const by = Object.fromEntries(ranked.map((r) => [r.coin, r]));
++  assert.equal(VOLATILITY_WATCH_DEFAULTS.hurdlePct, 5.5, 'the hurdle is the account round trip + stop at RR 1.5');
++  assert.ok(by.RUNNER, 'the runner is ranked');
++  assert.ok(by.RUNNER.fitness > 1.9 && by.RUNNER.fitness < 2.1, `11% / 5.5% ~ 2.0x, got ${by.RUNNER.fitness}`);
++  assert.ok(by.MID && Math.abs(by.MID.fitness - 1) < 0.02, `5.5% is exactly 1.0x, got ${by.MID?.fitness}`);
++  // ARBLIKE is ranked or filtered as too quiet, but either way it must never read as able to pay
++  if (by.ARBLIKE) assert.ok(by.ARBLIKE.fitness < 0.1, `0.32% cannot clear a 5.5% hurdle, got ${by.ARBLIKE.fitness}`);
++  assert.equal(ranked[0].coin, 'RUNNER', `the fittest is first: ${JSON.stringify(ranked.map((r) => [r.coin, r.fitness, r.score]))}`);
++  assert.ok(ranked[0].score > ranked[1].score);
++});
++
++test('FIX98-2: a fitter nominee DISPLACES the weakest incumbent — it does not wait for a slot to age out', () => {
++  const carried = [hot('WEAK', 30 * MIN), hot('MIDDLING', 12 * MIN), hot('STRONG', 11 * MIN)];
++  const nominations = [
++    { coin: 'WEAK', score: 0.9 }, { coin: 'MIDDLING', score: 2.0 }, { coin: 'STRONG', score: 3.0 },
++    { coin: 'FITTER', score: 2.5 },
++  ];
++  const verified = [...carried, pair('FITTER')];
++  const plan = planHotAdoption({ nominations, carried, verified, nowTs: NOW, slots: 3, minHoldMs: 10 * MIN });
++  assert.deepEqual(plan.adopt.map((p) => p.coin), ['FITTER']);
++  assert.deepEqual(plan.evict, ['WEAK/USD'], 'the WEAKEST yields — not the oldest by accident, the weakest by fit');
++  const rel = plan.released.find((r) => r.coin === 'WEAK');
++  assert.equal(rel.reason, 'DISPLACED_BY_BETTER_FIT'); assert.equal(rel.by, 'FITTER'); assert.equal(rel.wasFit, 0.9); assert.equal(rel.fit, 2.5);
++  assert.equal(plan.adopt[0].hotScore, 2.5, 'the pair remembers the fit it entered with');
++});
++
++test('FIX98-3: a nominee that fits WORSE than every incumbent does not evict anyone', () => {
++  const carried = [hot('A', 30 * MIN), hot('B', 30 * MIN), hot('C', 30 * MIN)];
++  const nominations = [{ coin: 'A', score: 3 }, { coin: 'B', score: 4 }, { coin: 'C', score: 5 }, { coin: 'WORSE', score: 1.2 }];
++  const plan = planHotAdoption({ nominations, carried, verified: [...carried, pair('WORSE')], nowTs: NOW, slots: 3, minHoldMs: 10 * MIN });
++  assert.deepEqual(plan.adopt, []); assert.deepEqual(plan.evict, []);
++  assert.deepEqual(plan.skipped, [{ coin: 'WORSE', reason: 'FITS_LESS_THAN_EVERY_INCUMBENT', retry: true }], 'and it is RETRIED — its fit changes minute to minute');
++});
++
++test('FIX98-4: with free slots the fittest nominee is adopted FIRST, so the best coin reaches the Judge first', () => {
++  const nominations = [{ coin: 'OK', score: 1.1 }, { coin: 'BEST', score: 4.4 }, { coin: 'GOOD', score: 2.2 }];
++  const verified = [pair('OK'), pair('BEST'), pair('GOOD')];
++  const plan = planHotAdoption({ nominations, carried: [], verified, nowTs: NOW, slots: 2, minHoldMs: 10 * MIN });
++  assert.deepEqual(plan.adopt.map((p) => p.coin), ['BEST', 'GOOD'], 'fittest first; the weakest waits and is retried');
++  assert.deepEqual(plan.skipped, [{ coin: 'OK', reason: 'HOT_LANE_FULL', retry: true }]);
++});
++
++test('FIX98-5: an unscored incumbent is weaker than any scored one — a pair the watch has dropped is the first to go', () => {
++  const carried = [hot('SCORED', 30 * MIN), hot('DROPPED_BY_WATCH', 30 * MIN)];
++  // DROPPED_BY_WATCH is still nominated by another source (so not released), but carries no fit
++  const nominations = [{ coin: 'SCORED', score: 2.0 }, { coin: 'DROPPED_BY_WATCH' }, { coin: 'NEW', score: 1.0 }];
++  const plan = planHotAdoption({ nominations, carried, verified: [...carried, pair('NEW')], nowTs: NOW, slots: 2, minHoldMs: 10 * MIN });
++  assert.deepEqual(plan.evict, ['DROPPED_BY_WATCH/USD']);
++  assert.deepEqual(plan.adopt.map((p) => p.coin), ['NEW']);
++});
++
++test('FIX98-6: with no fitness anywhere the PUBLISH-FIX-96 order stands — oldest first, nothing regresses', () => {
++  const carried = [hot('OLD', 40 * MIN), hot('NEWER', 20 * MIN)];
++  const nominations = [{ coin: 'OLD' }, { coin: 'NEWER' }, { coin: 'X' }];
++  const plan = planHotAdoption({ nominations, carried, verified: [...carried, pair('X')], nowTs: NOW, slots: 2, minHoldMs: 10 * MIN });
++  assert.deepEqual(plan.evict, ['OLD/USD']); assert.deepEqual(plan.adopt.map((p) => p.coin), ['X']);
++});
+-- 
+2.43.0
+
