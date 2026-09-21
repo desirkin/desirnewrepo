@@ -5,6 +5,7 @@
 // exposure receives protected resources; stale pairs cannot supply fresh data.
 import { readLearnedRelooksToday } from '../learning/relook.js';
 import { performance } from 'node:perf_hooks';
+import { createTurnInbox, TURN_BUDGET_MS } from '../lib/turn-inbox.js';
 import { readVolatilityWatchNow } from '../learning/volatility-watch.js';
 import { raceUniverseLoad, startupOutcomeLine, startupNeedsRetry, createUniverseRetry, createTapeDownWatchdog, STARTUP_UNIVERSE_DEADLINE_MS } from './startup.js';
 import { loadConfig, coinFromSymbol, dataDir } from '../lib/config.js';
@@ -377,6 +378,14 @@ export async function runTape({ minutes = null, chaosAfterSec = null, log = cons
   const TAPE_TURN_REPORT_MS = 1000; let turnOpen = false; let turnCount = 0; let turnStartMs = 0; let slowestMessageMs = 0; let slowestMessageHead = ''; let longestTurnMs = 0; let longestTurnCount = 0;
   const closeTurn = () => { const span = Date.now() - turnStartMs; turnOpen = false; if (span > longestTurnMs) { longestTurnMs = span; longestTurnCount = turnCount; } if (span >= TAPE_TURN_REPORT_MS) log(`[${nowIso()}] TAPE TURN: ${turnCount} messages dispatched in ONE turn of the loop, ${span}ms (slowest single message this minute ${Math.round(slowestMessageMs)}ms: ${slowestMessageHead})`); };
   const turnReport = setInterval(() => { if (longestTurnMs > 0) log(`[${nowIso()}] TAPE TURNS 60s: longest turn ${longestTurnMs}ms carrying ${longestTurnCount} messages · slowest single message ${Math.round(slowestMessageMs)}ms${slowestMessageHead ? ` (${slowestMessageHead})` : ''}`); longestTurnMs = 0; longestTurnCount = 0; slowestMessageMs = 0; slowestMessageHead = ''; }, 60_000); turnReport.unref?.();
+  // PUBLISH-FIX-117: the firehose is drained in bounded turns. The socket's messages go into an ordered inbox and are handled in
+  // slices of at most TURN_BUDGET_MS of wall time, the loop yielding between slices (lib/turn-inbox.js). The first minute of
+  // 3fc737d3 read `TAPE TURN: 6529 messages dispatched in ONE turn of the loop, 2844ms`; a turn that long holds every timer, every
+  // database answer and the Judge's decision queue — it is what the 13-second blocks and the `hypothesis lock not durable` refusals
+  // were made of. Nothing is dropped or reordered; a message from a socket that has since closed is skipped (it would touch a new
+  // epoch's book with an old epoch's update); the venue re-sends a snapshot on reconnect.
+  const inbox = createTurnInbox({ handle: onMessage, budgetMs: TURN_BUDGET_MS });
+  const inboxReport = setInterval(() => { const st = inbox.status(); if (st.maxDepth > 0) log(`[${nowIso()}] TAPE INBOX 60s: deepest backlog ${st.maxDepth} messages · longest slice ${st.maxSliceMs}ms / ${st.maxSliceItems} messages (budget ${TURN_BUDGET_MS}ms) · slices ${st.slices} · skipped from a closed socket ${st.skipped}`); inbox.resetPeaks(); }, 60_000); inboxReport.unref?.();
   function onMessage(raw) {
     if (!turnOpen) { turnOpen = true; turnCount = 0; turnStartMs = Date.now(); setImmediate(closeTurn); }
     turnCount += 1; const t0 = performance.now();
@@ -588,7 +597,7 @@ export async function runTape({ minutes = null, chaosAfterSec = null, log = cons
     const why = d.reason === 'CONNECTION_DEAD' ? `no message for ${Math.round((now - (lastAnyMsgMs ?? now)) / 1000)}s` : `messages flow but no pair is live (${health.counts?.stale ?? '?'} stale)`;
     log(`[${nowIso()}] SILENT FEED — ${why}; tearing the socket down and reconnecting (${silentReconnects} so far)`);
     writeEvent('WS_SILENT_RECONNECT', { reason: d.reason, silentReconnects });
-    const old = ws; ws = null; old.onclose = null; old.onmessage = null; old.onerror = () => {};
+    const old = ws; ws = null; old.onclose = null; old.onmessage = null; old.onerror = () => {}; inbox.setCurrent(null); // PUBLISH-FIX-117: whatever the old socket queued is skipped
     try { old.close(); } catch { /* the peer may never answer; the handlers are detached */ }
     for (const book of books.values()) book.desync();
     feedGuard(() => executionFeed.onDisconnect(now));
@@ -610,10 +619,11 @@ export async function runTape({ minutes = null, chaosAfterSec = null, log = cons
       subscribeAll();
       feedGuard(() => executionFeed.onConnect(Date.now()));
     };
-    ws.onmessage = (e) => onMessage(e.data);
+    { const sock = ws; inbox.setCurrent(sock); ws.onmessage = (e) => inbox.push(e.data, sock); } // PUBLISH-FIX-117: queued, drained in bounded turns
     ws.onerror = () => {};
     ws.onclose = () => {
       if (stopping) return;
+      inbox.setCurrent(null); // PUBLISH-FIX-117: nothing queued by the closed socket is applied after the disconnect
       for (const book of books.values()) book.desync();
       feedGuard(() => executionFeed.onDisconnect(Date.now()));
       writeEvent('WS_DISCONNECTED', {});
@@ -643,7 +653,7 @@ export async function runTape({ minutes = null, chaosAfterSec = null, log = cons
       clearInterval(heartbeatTimer);
       clearInterval(snapshotTimer);
       clearInterval(resourceTimer);
-      clearInterval(hotLaneTimer); clearInterval(turnReport); universeRetry.stop(); startupWatchdog.stop();
+      clearInterval(hotLaneTimer); clearInterval(turnReport); clearInterval(inboxReport); universeRetry.stop(); startupWatchdog.stop();
       clearInterval(microTimer);
       if (chaosTimer) clearTimeout(chaosTimer);
       if (durationTimer) clearTimeout(durationTimer);
