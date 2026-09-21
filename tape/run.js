@@ -146,21 +146,27 @@ export async function runTape({ minutes = null, chaosAfterSec = null, log = cons
   }
 
   // ---- hot lane (PUBLISH-FIX-28): a WIDE EYE nominee joins the deep tape NOW, not next session -------------------------
-  let hotSeen = new Set(); let hotLaneBusy = false; let hotLaneSkips = 0; const hotLane = { slots: xp.hotLane?.slots ?? HOT_LANE_DEFAULTS.slots, tenureMs: xp.hotLane?.tenureMs ?? HOT_LANE_DEFAULTS.tenureMs };
+  let hotSeen = new Set(); let hotLaneBusy = false; let hotLaneSkips = 0; const hotLane = { slots: xp.hotLane?.slots ?? HOT_LANE_DEFAULTS.slots, minHoldMs: xp.hotLane?.minHoldMs ?? HOT_LANE_DEFAULTS.minHoldMs }; // PUBLISH-FIX-96: a thrash guard, not a lease
   async function adoptHotNominations() {
     if (stopping || hotLaneBusy) return;
     // PUBLISH-FIX-54: the LEARNED RE-LOOK's coins ride the same hot lane and the same venue verification as the wide eye's
     // PUBLISH-FIX-66: the VOLATILITY WATCH's movers ride the same hot lane (the owner: volume and volatility, never BTC)
-    const nominations = [...readWideEyeNominationsToday(), ...readLearnedRelooksToday({ dataDir: dataDir() }), ...readVolatilityWatchNow({ dataDir: dataDir() })].filter((n) => n && typeof n.coin === 'string' && !hotSeen.has(n.coin));
-    if (!nominations.length) return;
+    // PUBLISH-FIX-96 (2026-09-21): the CURRENT full nomination set is passed to the planner (it applies `seen` itself) so it can
+    // see which hot pairs are STILL nominated and release the ones that are not. Pre-filtering by `seen` here hid that from it.
+    const nominations = [...readWideEyeNominationsToday(), ...readLearnedRelooksToday({ dataDir: dataDir() }), ...readVolatilityWatchNow({ dataDir: dataDir() })].filter((n) => n && typeof n.coin === 'string');
+    const nominatedNow = new Set(nominations.map((n) => n.coin));
+    // a hot pair no longer nominated must yield even when nothing new is waiting; that needs no venue verification, so it runs first
+    const stale = [...pairs.values()].filter((p) => p.hot === true && !pinnedSymbols().has(p.symbol) && !nominatedNow.has(p.coin) && Date.now() - (p.hotSinceTs ?? 0) >= hotLane.minHoldMs);
+    const freshNominees = nominations.filter((n) => !hotSeen.has(n.coin));
+    if (!stale.length && !freshNominees.length) return;
     // review finding (PUBLISH-FIX-83 item 15): a nominee refused for a full lane is retried each minute now — but a full lane with no
     // tenure-eligible pair cannot adopt anything, so the venue verification (two REST fetches and a universe-record rewrite) is not run
-    { const hotNow = [...pairs.values()].filter((p) => p.hot === true); const pinnedNow = pinnedSymbols(); const canYield = hotNow.some((p) => !pinnedNow.has(p.symbol) && Date.now() - (p.hotSinceTs ?? 0) >= hotLane.tenureMs); const allCarried = nominations.every((n) => [...pairs.values()].some((p) => p.coin === n.coin)); if (hotNow.length >= hotLane.slots && !canYield && !allCarried) { hotLaneSkips = (hotLaneSkips ?? 0) + 1; if (hotLaneSkips % 30 === 1) log(`[${nowIso()}] HOT LANE full (${hotNow.length}/${hotLane.slots}, none past tenure): ${nominations.length} nominee(s) wait; verification not run`); return; } }
+    { const hotNow = [...pairs.values()].filter((p) => p.hot === true); const pinnedNow = pinnedSymbols(); const canYield = hotNow.some((p) => !pinnedNow.has(p.symbol) && Date.now() - (p.hotSinceTs ?? 0) >= hotLane.minHoldMs); const allCarried = freshNominees.every((n) => [...pairs.values()].some((p) => p.coin === n.coin)); if (!stale.length && hotNow.length >= hotLane.slots && !canYield && !allCarried) { hotLaneSkips += 1; return; } } // PUBLISH-FIX-96: a stale slot to release is always worth the pass
     hotLaneBusy = true;
     try {
       const selection = await selectUniverse(config); // the SAME venue verification as the daily selection (floor, status, exclusion, cap)
       if (selection.error) { writeEvent('HOT_LANE_VERIFY_FAILED', { error: selection.error, coins: nominations.map((n) => n.coin) }); return; }
-      const plan = planHotAdoption({ nominations, carried: [...pairs.values()], verified: selection.verified ?? selection.pairs, pinned: pinnedSymbols(), seen: hotSeen, nowTs: Date.now(), slots: hotLane.slots, tenureMs: hotLane.tenureMs });
+      const plan = planHotAdoption({ nominations, carried: [...pairs.values()], verified: selection.verified ?? selection.pairs, pinned: pinnedSymbols(), seen: hotSeen, nowTs: Date.now(), slots: hotLane.slots, minHoldMs: hotLane.minHoldMs });
       hotSeen = plan.seen;
       for (const symbol of plan.evict) { const p = pairs.get(symbol); unsubscribePair(symbol); dropPair(symbol); writeEvent('PAIR_HOT_YIELDED', { symbol, hotForMs: Date.now() - (p?.hotSinceTs ?? Date.now()) }); log(`[${nowIso()}] HOT LANE: ${p?.coin ?? symbol} yields its hot slot after ${Math.round((Date.now() - (p?.hotSinceTs ?? Date.now())) / 60000)} min`); }
       for (const p of plan.adopt) {
@@ -168,7 +174,8 @@ export async function runTape({ minutes = null, chaosAfterSec = null, log = cons
         writeEvent('PAIR_HOT_ADOPTED', { symbol: p.symbol, coin: p.coin, usdVol24h: p.usdVol24h ?? null, cause: p.cause, nominatedTs: p.nominatedTs });
         log(`[${nowIso()}] HOT LANE: ${p.coin} joins the deep tape now (${p.cause}; ${p.usdVol24h ? `$${(p.usdVol24h / 1e6).toFixed(1)}M 24h` : 'volume n/a'}; hot slots ${[...pairs.values()].filter((x) => x.hot).length}/${hotLane.slots}) — the Judge sees it on its next nomination pass`);
       }
-      for (const k of plan.skipped) { if (k.reason !== 'ALREADY_CARRIED') log(`[${nowIso()}] HOT LANE: ${k.coin} not adopted (${k.reason})`); }
+      for (const r of plan.released ?? []) log(`[${nowIso()}] HOT LANE: ${r.coin} releases its hot slot — no longer among the movers (held ${Math.round(r.heldMs / 60000)} min)`); // PUBLISH-FIX-96
+      for (const k of plan.skipped) { if (k.reason !== 'ALREADY_CARRIED' && k.retry !== true) log(`[${nowIso()}] HOT LANE: ${k.coin} not adopted (${k.reason})`); }
       { const m = mergeCarriedIntoCurrentUniverse([...pairs.values()].filter((x) => x.hot), { yielded: plan.evict }); if (!m.ok) log(`[${nowIso()}] HOT LANE: current-universe record not updated (${m.reason}); the Judge sees the newcomer at the next selection`); } // PUBLISH-FIX-83 item 15: yielded pairs leave the record; the carried hot pairs are re-merged after EVERY selection (selectUniverse rewrote the record without them — review finding)
     } catch (err) { log(`[${nowIso()}] HOT LANE degraded (tape unaffected): ${String(err?.message ?? err).slice(0, 160)}`); }
     finally { hotLaneBusy = false; }

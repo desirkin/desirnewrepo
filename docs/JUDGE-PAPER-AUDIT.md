@@ -303,6 +303,21 @@ nothing (heavy selling +0.06% at 15 minutes, strong buying +0.07%). A line someb
   Tests: publish-fix-94-watch-sees-runners FIX95-1 (the six tradable runners clear it, SYND/DUCK/BLUE dust does not, and at
   the old floor only DRV survived); wideeye nomination-merge fixture moved to a $50k below-floor nominee; social-4f-scope
   SCOPE-5 carries the audited exception.
+- `tape/hot-lane.js` + `tape/run.js` (re-pinned) + `cobra.config.json` (PUBLISH-FIX-96, 2026-09-21; owner directive: "Nothing should
+  be blocking. Nothing stale should just sit there blocking"): three rules in the hot lane held a deep-tape slot against a coin that
+  had stopped earning it, or refused a coin for ever on one look. (1) A hot pair was evicted ONLY to make room for a new nominee —
+  with nothing new arriving, a coin whose run ended an hour ago kept its order-book subscription, and its share of a main thread
+  already at 88-91%, indefinitely. A slot is now held only while the coin is still nominated by some source (the volatility watch's
+  band of 12 is the hysteresis); the moment it is not, it yields, whether or not anyone is waiting, and that path needs no venue
+  verification so it runs before the selectUniverse guard. (2) `tenureMs` was a two-hour FLOOR: even with a fresh runner waiting the
+  stale pair kept the slot. It is now `minHoldMs` = 10 min, a thrash guard, in HOT_LANE_DEFAULTS and in
+  universeExpansion.hotLane (audited in the SCOPE-5 config fence). (3) NOT_VERIFIED_BY_VENUE_SELECTION was written into `seen`, so a
+  coin the venue check refused once was never looked at again that session — and a runner's 24-hour volume BUILDS WHILE IT RUNS
+  (under the floor at 03:00, well over it at 10:00 is the normal shape). That refusal is now retryable and never remembered; a
+  nomination for a pair that is already hot is an affirmation, not a skip. Held/pending exposure (pinned) is never released. The
+  Judge is untouched. Tests: publish-fix-96-nothing-stale-blocks (5; all 5 fail on the previous code), tape-hot-lane (4, updated to
+  the new law). Green: social-4f-scope, universe, wideeye, publish-fix-94, learning-volatility-watch, tape-resource-law,
+  judge-composition, paper-runtime, coin-dossier.
 - `tools/gate-study-process.js` / `tools/gate-study-child.js`: the join runs in a child process every 30 minutes (90 s
   after boot first); the main thread never reads the ledger; the lesson lands in `data/learning/gate-lessons/lesson.json`
   (+ `state.json` with the proposal history). `fly.js` composes the reader as the Judge's port.

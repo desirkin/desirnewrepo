@@ -167,7 +167,7 @@ test('SCOPE-5 (7). research configuration is closed: no wildcard, bounded caps, 
   for (const k of Object.keys(baseline)) {
     if (k === 'universe') continue; // audited below
     // PUBLISH-FIX-83 item 38 (2026-09-20): universeExpansion.resource.maxHeapMb 512 -> 3000, ONE value with the paper profile's overlay (config/paper-runtime.json) — the two used to disagree
-    if (k === 'universeExpansion') { const { hotLane, resource, ...rest } = current[k]; assert.deepEqual(hotLane, { slots: 6, tenureMs: 7_200_000 }); assert.deepEqual(resource, { ...baseline[k].resource, maxHeapMb: 3000 }); const { resource: _r, ...baseRest } = baseline[k]; assert.deepEqual(rest, baseRest, 'config.universeExpansion unchanged but for hotLane and the heap ceiling'); continue; }
+    if (k === 'universeExpansion') { const { hotLane, resource, ...rest } = current[k]; assert.deepEqual(hotLane, { slots: 6, minHoldMs: 600_000 }); /* PUBLISH-FIX-96 (2026-09-21, owner: "nothing stale should just sit there blocking"): the two-hour tenure was a LEASE — a hot pair kept its deep-tape slot for two hours after its run ended, and was evicted only when someone else wanted it. A slot is now held only while the coin is still nominated; minHoldMs is a thrash guard. */ assert.deepEqual(resource, { ...baseline[k].resource, maxHeapMb: 3000 }); const { resource: _r, ...baseRest } = baseline[k]; assert.deepEqual(rest, baseRest, 'config.universeExpansion unchanged but for hotLane and the heap ceiling'); continue; }
     // PUBLISH-FIX-95 (2026-09-21): wideeye.nominationFloorUsd 2_000_000 -> 100_000, ONE value. A nominated coin must clear this 24-hour
     // dollar floor before tape/universe.js will verify it for the hot lane, so at $2M the VOLATILITY WATCH's movers were ranked, picked
     // and then refused at the venue check: of the 77 Kraken USD pairs that ran >= 10% on 2026-09-20, the liquid ones sat at $180k-$264k
@@ -328,7 +328,17 @@ test('SCOPE-8 (9/10). protected surfaces are byte-identical to 9c17372; authorit
     // surface. Tests: test/publish-fix-84-silent-feed.test.js. Same publish, reviewer finding: a subscribe ACK clears the pair's failure
     // count and a NEW connection re-tries every subscribe-failed pair (`unavailable` was a one-way door for the life of the process; a
     // resource-shed pair still waits for the resource law). Subscriptions only.
-    'tape/run.js': '4ae7c8a9a65e35d5ca085af1fffdfc426ac8f3cba1738f0931b4e07ff2cca369',
+    // PUBLISH-FIX-96 (2026-09-21, owner directive: "nothing stale should just sit there blocking"). Three changes in the HOT LANE poll,
+    // subscriptions only — no trading, control or model surface, and the Judge's law is untouched:
+    //   (a) the CURRENT full nomination set is passed to planHotAdoption (it applies `seen` itself) instead of being pre-filtered by
+    //       `seen` here, so the planner can see which hot pairs are STILL nominated and release the ones that are not;
+    //   (b) a hot pair no longer nominated is released even when nothing is waiting for its slot — that path needs no venue
+    //       verification, so it runs before the selectUniverse guard and the guard no longer short-circuits a pass that has a
+    //       stale slot to free;
+    //   (c) hotLane.tenureMs (a two-hour lease) -> hotLane.minHoldMs (a thrash guard), and retryable skips are no longer logged
+    //       every minute. Tests: test/publish-fix-96-nothing-stale-blocks.test.js (5; all fail on the previous code),
+    //       test/tape-hot-lane.test.js.
+    'tape/run.js': '4e35ceac2bd000409c04154c41708929b0a15dcb6a22d6bfdf25fcdbb6f4f1f6',
     'rumor2/providers/x-official.js': '19d71247854289e5c8ee3c2f2ba0996ace78688c85bae88f160403cd2748ce0a',
     'rumor2/social-time.js': '414f5101723cc8f77ae9c99a6477dbd68f1eeac6d856f015fca763894e9e2a98',
     // PUBLISH-FIX-11 (2026-09-16): reconciler.hydrate reuses the replay's derived index entry for each target when the
