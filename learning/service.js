@@ -209,6 +209,9 @@ export function startLearning({
     // One optional step; failure is reported without suppressing other lanes.
     // Absent port performs no shadow work. The owner must keep any heavy
     // learning workload isolated from the trading/Watch event loop.
+    // PUBLISH-FIX-116 diagnostic: a learning step that held the main lane for a second or more says so on its own line (the meter's
+    // per-step figures were only ever in the status snapshot; the log never named a slow maturation or learn pass)
+    try { const lanes = meter.snapshot().byLabel; for (const [label, row] of Object.entries(lanes)) if (row.lastMs >= 1000) log(`LEARNING STEP ${label} held the main lane ${row.lastMs}ms (max ${row.maxMs}ms over ${row.count} ticks)`); } catch { /* measurement only */ }
     if (shadowRunner) { try { report.shadow = meter.time('shadow', () => shadowRunner.step({ nowTs })); } catch (err) { errors.shadow += 1; report.shadow = { failed: String(err?.message ?? err).slice(0, 200) }; } }
     if (opportunityAuditFollowup) {
       try {

@@ -4,6 +4,7 @@
 // display seeds grant no special depth or seats. Only actual held/pending
 // exposure receives protected resources; stale pairs cannot supply fresh data.
 import { readLearnedRelooksToday } from '../learning/relook.js';
+import { performance } from 'node:perf_hooks';
 import { readVolatilityWatchNow } from '../learning/volatility-watch.js';
 import { raceUniverseLoad, startupOutcomeLine, startupNeedsRetry, createUniverseRetry, createTapeDownWatchdog, STARTUP_UNIVERSE_DEADLINE_MS } from './startup.js';
 import { loadConfig, coinFromSymbol, dataDir } from '../lib/config.js';
@@ -369,7 +370,19 @@ export async function runTape({ minutes = null, chaosAfterSec = null, log = cons
     }
   }
 
+  // PUBLISH-FIX-116 diagnostic: how many venue messages arrive in ONE turn of the loop, and how long that turn takes. The socket
+  // hands the parser whole chunks, and every message in a chunk is dispatched before the loop yields; after any pause the kernel
+  // buffer holds seconds of the firehose, so one turn can carry thousands. Only a turn over TAPE_TURN_REPORT_MS (or the longest turn
+  // of the minute) is written; the count is what says whether a long block was a backlog or one slow message.
+  const TAPE_TURN_REPORT_MS = 1000; let turnOpen = false; let turnCount = 0; let turnStartMs = 0; let slowestMessageMs = 0; let slowestMessageHead = ''; let longestTurnMs = 0; let longestTurnCount = 0;
+  const closeTurn = () => { const span = Date.now() - turnStartMs; turnOpen = false; if (span > longestTurnMs) { longestTurnMs = span; longestTurnCount = turnCount; } if (span >= TAPE_TURN_REPORT_MS) log(`[${nowIso()}] TAPE TURN: ${turnCount} messages dispatched in ONE turn of the loop, ${span}ms (slowest single message this minute ${Math.round(slowestMessageMs)}ms: ${slowestMessageHead})`); };
+  const turnReport = setInterval(() => { if (longestTurnMs > 0) log(`[${nowIso()}] TAPE TURNS 60s: longest turn ${longestTurnMs}ms carrying ${longestTurnCount} messages · slowest single message ${Math.round(slowestMessageMs)}ms${slowestMessageHead ? ` (${slowestMessageHead})` : ''}`); longestTurnMs = 0; longestTurnCount = 0; slowestMessageMs = 0; slowestMessageHead = ''; }, 60_000); turnReport.unref?.();
   function onMessage(raw) {
+    if (!turnOpen) { turnOpen = true; turnCount = 0; turnStartMs = Date.now(); setImmediate(closeTurn); }
+    turnCount += 1; const t0 = performance.now();
+    try { onMessageInner(raw); } finally { const dt = performance.now() - t0; if (dt > slowestMessageMs) { slowestMessageMs = dt; slowestMessageHead = typeof raw === 'string' ? raw.slice(0, 80).replace(/\s+/g, ' ') : String(typeof raw); } }
+  }
+  function onMessageInner(raw) {
     lastAnyMsgMs = Date.now();
     let msg;
     try {
@@ -630,7 +643,7 @@ export async function runTape({ minutes = null, chaosAfterSec = null, log = cons
       clearInterval(heartbeatTimer);
       clearInterval(snapshotTimer);
       clearInterval(resourceTimer);
-      clearInterval(hotLaneTimer); universeRetry.stop(); startupWatchdog.stop();
+      clearInterval(hotLaneTimer); clearInterval(turnReport); universeRetry.stop(); startupWatchdog.stop();
       clearInterval(microTimer);
       if (chaosTimer) clearTimeout(chaosTimer);
       if (durationTimer) clearTimeout(durationTimer);
