@@ -27,7 +27,17 @@ export function indicatorBlock(bars, { referenceTs = null } = {}) {
   const last20 = bars.slice(-20); const h20 = Math.max(...last20.map((b) => num(b.high))); const l20 = Math.min(...last20.map((b) => num(b.low))); const last5 = bars.slice(-5); const envelope5 = Math.max(...last5.map((b) => num(b.high))) - Math.min(...last5.map((b) => num(b.low)));
   const prior20Ret = closes[closes.length - 1] / closes[closes.length - 21] - 1; const prior20HighIdx = last20.reduce((best, b, i) => (num(b.high) > num(last20[best].high) ? i : best), 0);
   const last3 = bars.slice(-3); const last3Low = Math.min(...last3.map((b) => num(b.low))); const last2High = Math.max(...bars.slice(-2).map((b) => num(b.high))); const low5 = Math.min(...last5.map((b) => num(b.low)));
-  return Object.freeze({ featureVersion: FEATURE_VERSION, blockDigest: barBlockDigest(bars), referenceTs: bars[bars.length - 1].periodEndTs, atr14: atr, ema5: ema(5), ema20: ema(20), h20, l20, envelope5, low5, prior20Return: prior20Ret, prior20High: num(last20[prior20HighIdx].high), prior20HighBarsFromEnd: 19 - prior20HighIdx, prior20Low: l20, last3Low, last2High, lastClose: closes[closes.length - 1], bars: bars.length, trueRanges: trs.length });
+  // PUBLISH-FIX-120 (2026-09-21): the two facts the coil study found. Measured over 23,445 one-minute moments on 45 USD pairs,
+  // labelled by PATH (a winner only if +12% arrived BEFORE the -1.2% stop, so a move we would have been stopped out of is a
+  // loss): price within half a percent of its TWO-HOUR low, and the last fifteen minutes compressed to under a ninth of the
+  // two-hour range, took the average trade from -0.911% to +1.033% after the full 1.60% round trip, on 338 trades. The same
+  // two conditions were found independently by a separate search at a +5% target (727 trades, break-even), which is why they
+  // are here and the four-condition 88% rule from the same search is not: that one was 25 rows out of 23,445 and is discarded.
+  // The window is what the block has, capped at 120 bars; a short block simply measures over fewer and says so in `coilBars`.
+  const coilWindow = bars.slice(-120); const coilBars = coilWindow.length;
+  const h120 = Math.max(...coilWindow.map((b) => num(b.high))); const l120 = Math.min(...coilWindow.map((b) => num(b.low)));
+  const last15 = bars.slice(-15); const range15 = Math.max(...last15.map((b) => num(b.high))) - Math.min(...last15.map((b) => num(b.low)));
+  return Object.freeze({ featureVersion: FEATURE_VERSION, blockDigest: barBlockDigest(bars), referenceTs: bars[bars.length - 1].periodEndTs, atr14: atr, ema5: ema(5), ema20: ema(20), h20, l20, h120, l120, range15, coilBars, envelope5, low5, prior20Return: prior20Ret, prior20High: num(last20[prior20HighIdx].high), prior20HighBarsFromEnd: 19 - prior20HighIdx, prior20Low: l20, last3Low, last2High, lastClose: closes[closes.length - 1], bars: bars.length, trueRanges: trs.length });
 }
 // confirmed swing high: strictly above two bars on either side, all five closed before the reference; nearest strictly above `entry`.
 // PUBLISH-FIX-85 (2026-09-20): `minAbove` — a swing high closer to the entry than this distance is noise, not a target: the nearest
