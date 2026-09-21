@@ -60,11 +60,51 @@ Digest law: `sha256` over the sorted repository-relative file list, each entry a
 
 ```
 FROZEN_FOR_PAPER
-judge/*.js       b03f77e5c07fd8c1b162c5b1377e10d0b6a71a12fef2daf44e7a5efc1c1a9953
+judge/*.js       2ce787fe6006cb5238b6d00b6ba0c55afa28d578076035f6bdd7e91bc2a1e4ed
 execution/*.js   019f8fefbace35dbfeafad17b14fac47305046434315dee07edf48e0ea5d9802
 watch/watch.js   6f319a1ee72a2b43346b8d07f906bb3ca31566ca7e3be0180d57f551d8a1afe1
-all (49 files)   30d1e0e3b002d4ab2083ff302248d5335b3ea37539f30dc39f67035476552406
+all (49 files)   bbece1310ba5b79ee1c9e3385542034ece11c91262db53dc50509641f22b6a4c
 ```
+
+### 4.47 Audited change — 2026-09-21 PUBLISH-FIX-119: the scenario floor was fee-blind and five of six setups had no projection — the hurdle was unreachable (previous judge digest `b03f77e5c07f…`; now `2ce787fe6006…`; all `30d1e0e3b002…` → `bbece1310ba5…`; execution and watch/watch.js UNCHANGED; 49 files)
+
+**The finding.** This application had never taken a trade: 7,889 scored decisions, zero entries, ever. Running the real cost
+law (`judge/cost.js evaluateEntry`) against a PERFECT book — infinite depth, a one-tick spread, zero slippage, nothing thin,
+nothing to blame — the smallest target that can EVER be sized is
+
+| structural stop | minimum sizeable target |
+|---|---|
+| 0.30% | 4.55% |
+| 0.50% | 4.85% |
+| 1.09% | 5.75% |
+| 1.72% | 6.70% |
+| 3.00% | 8.60% |
+
+because `REWARD_RISK_MIN` (1.5) is applied to FEE-INCLUSIVE terms: the 1.60% round trip is subtracted from the reward and
+added to the risk, so the requirement is `1.5*(stop + fees) + fees`, not `1.5*stop`. Every setup's target, meanwhile, is the
+high of the last TWENTY ONE-MINUTE BARS. The eight close calls of 2026-09-21 proposed 0.20%, 0.28%, 0.37%, 0.71%, 1.31%,
+1.40% and 1.77%. Three to twenty-five times too small. Two halves of the machine were built against different assumptions and
+the implied hurdle was never computed. This is not caution, not the fee alone, not depth, not the market: it is arithmetic
+that can never resolve, and it is why the snake never ate.
+
+**The change, `judge/setups.js` only (plus the round-trip rate passed from `judge/judge.js`).**
+1. `minTargetDistance(entry, structuralStop, feeRoundTripRate)` is fee-aware. Its stated job is "a swing high nearer than this
+   can never size"; it computed that floor without fees — the old comment admitted it ("reward below 1.5x risk before fees") —
+   so the guard never fired for the targets that actually occur, and `nearestResistanceAbove` would cap a target DOWN to a level
+   that could never pay. The floor it now computes matches the measured hurdle to two decimal places.
+2. `derivedProjection(ind, entry)` — one full 20-bar range above the entry — is used for a setup that carries no projection of
+   its own. MICRO_BITE has had exactly this shape since §4.x (PUBLISH-FIX-85); the other five never got one. A quiet coin has a
+   small range and is still refused at sizing, so the projection selects FOR coins that actually move.
+
+**What did NOT move:** `REWARD_RISK_MIN` 1.5, `bufferOf` (0.1×ATR), `REFERENCE_HAIRCUT` 0.5, the stop, the cost law, the
+admission law, and every gate. Passing a fee rate of `'0'` reproduces the previous scenario byte for byte, which
+`test/publish-fix-119-the-hurdle-was-unreachable.test.js` (5) asserts along with the measurement itself, the floor, the
+projection, and an end-to-end size on a realistic thin book (runner sizes with positive buffered profit; quiet coin refused).
+
+**Differential.** `test/judge-differential.test.js` correctly reports one substantive change and only one: a recorded
+decision's `scenario.target` moves 100200 → 104620 with its `decisionDigest`. No other field of any record differs. This is an
+intended, audited ruler move, so the base advances to this commit exactly as PUBLISH-FIX-83 advanced it from `ea3bfbf` to
+`1bfa669` (§4.32). Authority unchanged: PAPER_SIMULATION_ONLY.
 
 ### 4.46 Audited change — 2026-09-21 PUBLISH-FIX-118: the close call says the number (previous judge digest `9453d3f20166…`; now `b03f77e5c07f…`; all `ef57c5ce0af9…` → `30d1e0e3b002…`; execution and watch/watch.js UNCHANGED; 49 files)
 

@@ -157,18 +157,49 @@ export function fastClauses(setupId, frozen, fast, learned = null) {
 // looks past it to the nearest swing that could, or leaves the setup's own target. The stop is the setup's own; no fee enters here
 // (the cost law still applies fees and haircuts to whatever target results — a poor setup is still refused, at sizing, with reasons).
 export const TARGET_MIN_REWARD_RISK = REWARD_RISK_MIN;
-export function minTargetDistance(entry, structuralStop) {
-  const e = Number(entry); const st = Number(structuralStop);
+// PUBLISH-FIX-119 (2026-09-21). THE reason this application had never taken a trade: 7,889 scored decisions, zero entries, ever.
+//
+// Measured, not argued. Running the real cost law (judge/cost.js evaluateEntry) against a PERFECT book — infinite depth, a
+// one-tick spread, zero slippage, nothing thin to blame — the smallest target that can EVER be sized is:
+//       stop 0.30% -> target 4.55% | stop 0.50% -> 4.85% | stop 1.09% -> 5.75% | stop 1.72% -> 6.70% | stop 3.0% -> 8.60%
+// because the 1.5x reward-to-risk law is applied to FEE-INCLUSIVE terms: the round trip (1.60% at Kraken tier 1) is subtracted
+// from the reward AND added to the risk, so the required distance is 1.5*(stop + fees) + fees, not 1.5*stop.
+// And the target every setup actually proposes is the high of the last TWENTY ONE-MINUTE BARS. The eight close calls of
+// 2026-09-21 proposed: 0.20%, 0.28%, 0.37%, 0.71%, 1.31%, 1.40%, 1.77%. Three to twenty-five times too small. Not once close.
+// The gate stack and the sizing law were built against different assumptions and the implied hurdle was never computed.
+//
+// Two halves of the fix, both here:
+//  1. minTargetDistance now knows about fees. Its stated job is "a swing high nearer than this can never size"; it computed that
+//     floor WITHOUT fees (the old comment admitted it: "reward below 1.5x risk before fees"), so the guard never fired for the
+//     targets that actually occur, and the resistance cap happily capped a target down to a level that could never pay.
+//  2. a setup that carries no projection of its own gets one derived from the bars it already froze: one full 20-bar range above
+//     the entry. MICRO_BITE has had exactly this shape since PUBLISH-FIX-85; the other five never got it. A quiet coin has a
+//     small range and is still refused at sizing, as it should be — the projection selects FOR coins that actually move, which
+//     is the owner's standing thesis ("runners, that's our prey") and the only population where these economics can close.
+// Nothing here relaxes the cost law, the reward-to-risk law, the stop, or any gate. The scenario is still a scenario and sizing
+// still refuses it with its own reasons. Authority unchanged.
+export function minTargetDistance(entry, structuralStop, feeRoundTripRate = '0') {
+  const e = Number(entry); const st = Number(structuralStop); const fr = Number(feeRoundTripRate);
   if (!Number.isFinite(e) || !Number.isFinite(st) || !(st > 0) || !(st < e)) return 0;
-  return (e - st) * Number(TARGET_MIN_REWARD_RISK);
+  const fees = Number.isFinite(fr) && fr > 0 ? e * fr : 0; // the round trip, valued at the entry (monotone and conservative)
+  return (e - st + fees) * Number(TARGET_MIN_REWARD_RISK) + fees;
 }
-// A setup whose own target is not at least that distance above the entry (the price already ran past it) has an EXHAUSTED scenario:
-// if the setup carries a projection (`scenarioProjected`, MICRO_BITE: one 20-bar range above the 20-bar high) that lies above the
-// entry, the projection is the scenario; otherwise the raw target stands and sizing refuses it with its reasons, as before.
-export function scenarioTarget(frozen, bars, entry, referenceTs) {
+// one full 20-bar range above the entry — the projection MICRO_BITE has carried since PUBLISH-FIX-85, for the setups that lack one
+export function derivedProjection(ind, entry) {
+  if (!ind) return null;
+  try {
+    const h20 = d(ind.h20); const l20 = d(ind.l20);
+    if (!M.isPositive(h20) || !M.isPositive(l20) || !M.lt(l20, h20)) return null;
+    return M.add(d(entry), M.sub(h20, l20));
+  } catch { return null; }
+}
+// A setup whose own target is not at least that distance above the entry (the price already ran past it, or it never reached the
+// fee-inclusive floor) has an EXHAUSTED scenario: the setup's own projection is used when it carries one, else the derived
+// 20-bar-range projection; otherwise the raw target stands and sizing refuses it with its reasons, as before.
+export function scenarioTarget(frozen, bars, entry, referenceTs, ind = null, feeRoundTripRate = '0') {
   let raw = frozen.scenarioRaw; if (raw === null || raw === undefined) return { target: null, cappedBy: null };
-  const minAbove = minTargetDistance(entry, frozen.structuralStop);
-  const projected = frozen.scenarioProjected ?? null;
+  const minAbove = minTargetDistance(entry, frozen.structuralStop, feeRoundTripRate);
+  const projected = frozen.scenarioProjected ?? derivedProjection(ind, entry);
   if (projected !== null && Number(raw) <= Number(entry) + minAbove && M.gt(projected, raw)) raw = projected;
   const res = nearestResistanceAbove(bars, Number(entry), { referenceTs, minAbove });
   if (res && M.lt(d(res.price), raw)) return { target: d(res.price), cappedBy: { price: d(res.price), periodStartTs: res.periodStartTs } };
@@ -204,14 +235,14 @@ export function setupStrengthFacts(frozen, fast) {
   const evidenceKnown = known(fast?.continuationEvidence);
   return Object.freeze({ strengthFactsVersion: 'judge-setup-strength-facts-1', priceBeyondTriggerAtr, relativeVolume60: known(fast?.rv60) ? fast.rv60.rv60 : null, flow15: known(fast?.fi15) ? fast.fi15.fi : null, flow60: known(fast?.fi60) ? fast.fi60.fi : null, depth10bps: fast?.depth10bps ?? null, continuationPhase: evidenceKnown ? fast.continuationEvidence.phase ?? null : null, evidenceDimensions: evidenceKnown && Array.isArray(fast.continuationEvidence.dimensions) ? [...fast.continuationEvidence.dimensions] : null, exhausted: exhaustionKnown ? fast.exhaustion.exhausted : null, known: Object.freeze({ relativeVolume60: known(fast?.rv60), flow15: known(fast?.fi15), flow60: known(fast?.fi60), liquidity: fast?.depth10bps !== null && fast?.depth10bps !== undefined, continuation: evidenceKnown, exhaustion: exhaustionKnown }), sourceAgeMs: Object.freeze({ book: fast?.bookAgeMs ?? null, continuation: age(fast?.continuationEvidence), exhaustion: age(fast?.exhaustion) }) });
 }
-export function evaluateSetup({ setupId, frozen, ind, fast, bars, entry, decisionTs, event = null, ablate = null, learned = null }) {
+export function evaluateSetup({ setupId, frozen, ind, fast, bars, entry, decisionTs, event = null, ablate = null, learned = null, feeRoundTripRate = '0' }) {
   if (!SETUP_EVALUATORS.includes(setupId)) throw new Error(`unknown setup ${setupId}`);
   if (ablate && ablate.setupId === setupId) { const allowed = ABLATABLE_CLAUSES[setupId] ?? []; const bad = (ablate.clauses ?? []).filter((id) => !allowed.includes(id)); if (bad.length) throw new Error(`clauses ${bad.join(',')} are not ablatable for ${setupId}`); }
   const structural = structuralClauses(setupId, frozen, ind, fast, { decisionTs, event, learned }); const quick = fastClauses(setupId, frozen, fast, learned); const all = [...structural, ...quick];
   let ablated = []; if (ablate && ablate.setupId === setupId) ablated = all.filter((x) => ablate.clauses.includes(x.id)).map((x) => ({ ...x, ablated: true }));
   const clauses = ablated.length ? all.filter((x) => !ablate.clauses.includes(x.id)) : all;
   const needsData = clauses.filter((x) => x.value === null && !x.ok).map((x) => x.id); const refused = clauses.filter((x) => !x.ok).map((x) => x.id);
-  const t = scenarioTarget(frozen, bars, entry, frozen.referenceTs); const stopOk = M.isPositive(frozen.structuralStop) && M.lt(frozen.structuralStop, entry);
+  const t = scenarioTarget(frozen, bars, entry, frozen.referenceTs, ind, feeRoundTripRate); const stopOk = M.isPositive(frozen.structuralStop) && M.lt(frozen.structuralStop, entry);
   if (!stopOk) refused.push('STOP_GEOMETRY');
   const state = refused.length === 0 ? 'ELIGIBLE' : needsData.length && needsData.length === refused.length ? 'NEEDS_DATA' : 'REFUSED';
   const definition = setupDefinition(setupId);

@@ -84,6 +84,9 @@ export function createJudge({ accountId, policy, policyDigest, dispatcher, feed,
     && policy?.watchVersion === EDGE_WATCH_VERSION
     && policy?.setups?.selectionVersion === SETUP_SELECTION_VERSION
     && policy?.setups?.edgeStateVersion === EDGE_STATE_VERSION;
+  // PUBLISH-FIX-119: the round trip as a rate, for the scenario's fee-inclusive floor (judge/setups.js minTargetDistance).
+  // Taker in and taker out at the contract's own rate; unknown fee -> '0', which reproduces the old fee-blind floor exactly.
+  const roundTripRateOf = (symbol) => { try { const f = feeOf(symbol); return f && f.rate ? M.mul(f.rate, '2') : '0'; } catch { return '0'; } };
   const keepSnapshots = Boolean(armRule?.challengers?.length);
   const S = scheduler ?? createScheduler({ monotonic: () => clock.monotonic() }); const setups = armRule?.setups ?? enabledSetups ?? policy.setups.enabled;
   // EDGE_STATE setups are research evaluators only until both their post-size
@@ -457,7 +460,7 @@ export function createJudge({ accountId, policy, policyDigest, dispatcher, feed,
       ? deriveOperationalEntryFacts({ setupId, decisionTs: D, frozen, fast, books: c.books, catalyst: intake.event ?? c.catalystEvent ?? null })
       : null;
     const evaluatedFast = operationalFacts ? { ...fast, ...operationalFacts } : fast;
-    const learnedLines = learnedLinesNow(setupId); /* PUBLISH-FIX-82: one read per decision, per setup (RV60 is learned per setup) */ const setup = evaluateSetup({ setupId, frozen, ind, fast: atTrigger ? { ...evaluatedFast, atTrigger } : evaluatedFast, bars: c.indicatorsRef.bars, entry, decisionTs: D, event: intake.event ?? c.catalystEvent ?? null, ablate: armRule?.ablate ?? null, learned: learnedLines }); const baseMeasurements = [...setup.clauses, ...gateLearningMeasurement(learnedLines, setupId)];
+    const learnedLines = learnedLinesNow(setupId); /* PUBLISH-FIX-82: one read per decision, per setup (RV60 is learned per setup) */ const setup = evaluateSetup({ setupId, frozen, ind, fast: atTrigger ? { ...evaluatedFast, atTrigger } : evaluatedFast, bars: c.indicatorsRef.bars, entry, decisionTs: D, event: intake.event ?? c.catalystEvent ?? null, ablate: armRule?.ablate ?? null, learned: learnedLines , feeRoundTripRate: roundTripRateOf(c.symbol) /* PUBLISH-FIX-119 */ }); const baseMeasurements = [...setup.clauses, ...gateLearningMeasurement(learnedLines, setupId)];
     // learned contribution (dormant without the injected port): resolved from the prepared snapshot and THIS
     // decision's already-prepared facts only; any resolver fault falls back to baseline with the fault logged
     let learned = null;
