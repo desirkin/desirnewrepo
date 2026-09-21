@@ -1,0 +1,178 @@
+From 6e217ec1c67598120c108de31749126418b88253 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 21 Sep 2026 00:02:15 +0000
+Subject: [PATCH] =?UTF-8?q?PUBLISH-FIX-92:=20the=20maturation=20sweep=20wa?=
+ =?UTF-8?q?s=20stalled=20=E2=80=94=20settle-at-deadline=20rows=20are=20new?=
+ =?UTF-8?q?=20attachments?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Artifact: learning/status.json 2026-09-20 23:53 UTC — maturation {matured 0, pending 0, unavailable 200}
+every tick, errors 0; outcomes.jsonl 131,980 rows over 14,731 opportunities, 4-12 new rows an hour since
+2026-09-20 04:00; 6,941 judge looks in 48 h with no outcome row.
+
+Cause: an episode with a SHORT-stage row whose data then left the live window was settled at its deadline by
+pushing a COPY of the existing row (same attachedTs, same supersedes). The store's duplicate check dropped it
+silently; the episode never left the pending set; the oldest 200 such episodes consumed the whole sweep budget
+on every tick, so the newest judge looks were never labelled and FIX-86's counterfactual produced nothing.
+
+Fix: the settlement is a new attachment — this sweep's clock, superseding the row it settles. The tick report
+names settledAtDeadline / skippedRecent / written so a stalled sweep is visible in status.
+
+Test: test/publish-fix-92-settle-supersedes.test.js (fails on the previous code). Neighbours green:
+learning-maturation, learning-service, publish-fix-86-live-counterfactual, research-maturation, learning-fences.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01RoFoPS22WFW1oUnbWzPayd
+---
+ docs/JUDGE-PAPER-AUDIT.md                     | 10 +++
+ learning/maturation.js                        |  7 +-
+ learning/service.js                           |  2 +-
+ test/publish-fix-92-settle-supersedes.test.js | 82 +++++++++++++++++++
+ 4 files changed, 99 insertions(+), 2 deletions(-)
+ create mode 100644 test/publish-fix-92-settle-supersedes.test.js
+
+diff --git a/docs/JUDGE-PAPER-AUDIT.md b/docs/JUDGE-PAPER-AUDIT.md
+index a5556e2..8325130 100644
+--- a/docs/JUDGE-PAPER-AUDIT.md
++++ b/docs/JUDGE-PAPER-AUDIT.md
+@@ -266,6 +266,16 @@ nothing (heavy selling +0.06% at 15 minutes, strong buying +0.07%). A line someb
+   the broad-Kraken reader's boot window (3 newest segments, ~43 min) could not hold 60 minutes after a restart. The process now
+   reads ONE broad-Kraken series (BROAD_SERIES_SEGMENTS = 12, ~2.8 h) shared by the mover seed, the volatility watch, the live
+   archive and the decision-outcome recorder. Tests: publish-fix-86-live-counterfactual.
++- `learning/maturation.js` / `learning/service.js` (PUBLISH-FIX-92, 2026-09-21; not frozen): the maturation sweep was stalled.
++  Artifact: learning/status.json at 2026-09-20 23:53 UTC read maturation {matured 0, pending 0, unavailable 200} every tick with
++  errors 0; outcomes.jsonl held 131,980 attach rows over 14,731 opportunities, 4–12 new rows an hour since 2026-09-20 04:00
++  (all mover-study), and 6,941 judge looks in 48 h had no outcome row — so FIX-86's counterfactual, wired correctly, had
++  produced nothing for the judge. Cause: an episode with a SHORT-stage row whose data then left the live window was "settled"
++  at its deadline by pushing a copy of the EXISTING row (same attachedTs, same supersedes); the store's duplicate check
++  dropped it silently, the episode never left the pending set, and the oldest 200 such episodes consumed the whole budget on
++  every sweep. A settlement is now a NEW attachment (this sweep's clock, superseding the row it settles); the tick report
++  names settledAtDeadline / skippedRecent / written so a stalled sweep is visible in status. Tests: publish-fix-92-settle-supersedes
++  (fails on the previous code).
+ - `tools/gate-study-process.js` / `tools/gate-study-child.js`: the join runs in a child process every 30 minutes (90 s
+   after boot first); the main thread never reads the ledger; the lesson lands in `data/learning/gate-lessons/lesson.json`
+   (+ `state.json` with the proposal history). `fly.js` composes the reader as the Judge's port.
+diff --git a/learning/maturation.js b/learning/maturation.js
+index d55f81e..6795ff9 100644
+--- a/learning/maturation.js
++++ b/learning/maturation.js
+@@ -124,7 +124,12 @@ export function maturationSweep({ episodes, latestOutcomes, archive, asOfTs, att
+     }
+     let attach = matureEpisode({ episode: e, archive, asOfTs, attachedTs, costAssumptions, supersedes: existing ? existing.attachedTs : null });
+     if (attach === null) { if (pastDeadline && existing) { attach = settleAtDeadline(existing); } else if (pastDeadline) { pending += 1; continue; } else { pending += 1; continue; } }
+-    if (attach.outcomeRow.availability.state === 'UNAVAILABLE') { unavailable += 1; if (existing && pastDeadline && existing.outcomeRow.availability.state !== 'UNAVAILABLE') { attachments.push(settleAtDeadline(existing)); settledAtDeadline += 1; continue; } /* review finding: a SHORT-stage row whose data then left the window settles, instead of being re-labelled every sweep */ if (existing) continue; attachments.push(attach); continue; }
++    if (attach.outcomeRow.availability.state === 'UNAVAILABLE') { unavailable += 1; if (existing && pastDeadline && existing.outcomeRow.availability.state !== 'UNAVAILABLE') {
++        // PUBLISH-FIX-92 (2026-09-21, production stall): this settle row was pushed as a copy of the EXISTING row — same attachedTs, same
++        // supersedes — so the store's duplicate check (same opportunityId + attachedTs) silently dropped it every tick, the episode never
++        // left the pending set, and the oldest 200 such episodes ate the whole sweep budget forever (status: matured 0, pending 0,
++        // unavailable 200; 6,941 judge looks in 48 h with no outcome row). A settlement is a NEW attachment: this sweep's clock, superseding the row it settles.
++        attachments.push(deepFreeze({ ...settleAtDeadline(existing), attachedTs, supersedes: existing.attachedTs })); settledAtDeadline += 1; continue; } /* review finding: a SHORT-stage row whose data then left the window settles, instead of being re-labelled every sweep */ if (existing) continue; attachments.push(attach); continue; }
+     if (pastDeadline && outcomeStage(attach.outcomeRow) < 2) { attach = settleAtDeadline(attach); settledAtDeadline += 1; }
+     const stageNow = outcomeStage(attach.outcomeRow); const stageBefore = existing ? outcomeStage(existing.outcomeRow) : -1;
+     if (stageNow === 0) { pending += 1; continue; } // the bite and the continuation are not both in yet: no row that says half a thing
+diff --git a/learning/service.js b/learning/service.js
+index 6a7baad..d1b28a1 100644
+--- a/learning/service.js
++++ b/learning/service.js
+@@ -127,7 +127,7 @@ export function startLearning({
+     const latest = store.latestOutcomes();
+     const sweep = maturationSweep({ episodes, latestOutcomes: latest, archive, asOfTs: nowTs, attachedTs: nowTs, maxPerSweep: MAX_MATURATION_PER_TICK, costAssumptions });
+     for (const attach of sweep.attachments) { try { store.appendOutcome(attach); if (attach.outcomeRow.availability.state !== 'UNAVAILABLE') counters.newlyMatured += 1; } catch (err) { errors.maturation += 1; log(`learning maturation: ${err.message}`); } }
+-    return { matured: sweep.matured, pending: sweep.pending, unavailable: sweep.unavailable };
++    return { matured: sweep.matured, pending: sweep.pending, unavailable: sweep.unavailable, settledAtDeadline: sweep.settledAtDeadline, skippedRecent: sweep.skippedRecent, written: sweep.attachments.length }; // PUBLISH-FIX-92: the status names every outcome of a sweep, so a stalled sweep is visible
+   }
+ 
+   function learnTick(nowTs) {
+diff --git a/test/publish-fix-92-settle-supersedes.test.js b/test/publish-fix-92-settle-supersedes.test.js
+new file mode 100644
+index 0000000..9bf290d
+--- /dev/null
++++ b/test/publish-fix-92-settle-supersedes.test.js
+@@ -0,0 +1,82 @@
++// PUBLISH-FIX-92 (2026-09-21) — the settle-at-deadline row is a NEW attachment, not a copy of the old one.
++//
++// Production artifact (learning/status.json 2026-09-20 23:53 UTC, deployment 2d71906e): maturation {matured 0, pending 0,
++// unavailable 200} on every tick, errors 0, while 6,941 judge looks in 48 h had no outcome row at all. Cause: an episode with a
++// SHORT-stage row whose data then left the 6-hour live window was "settled" by pushing a copy of the EXISTING row (same
++// attachedTs, same supersedes); the store's duplicate check dropped it silently; the episode stayed pending; the oldest 200
++// such episodes consumed the sweep budget every tick, and the newest looks were never reached.
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import path from 'node:path';
++import { tmpdir } from 'node:os';
++import { mkdtempSync, rmSync } from 'node:fs';
++import { maturationSweep, outcomeStage, SETTLE_GRACE_MS } from '../learning/maturation.js';
++import { createLearningStore } from '../learning/store.js';
++import { buildEpisode } from '../learning/capture.js';
++import { BASELINE_RULE_VERSION } from '../learning/contracts.js';
++import { makeSeries, makeArchive, START_SEC, rallyDrift, burstVolume } from './helpers/learning.js';
++
++const MIN = 60_000;
++const decisionSec = START_SEC + 300 * 60;
++// the live shape: the capture is retrieved 16 minutes after the decision, so the short horizons are knowable and 60m/240m are not yet
++const series = makeSeries('AAA', START_SEC, 12 * 60, { drift: rallyDrift(400), volume: burstVolume(400), coverageEndSec: decisionSec + 16 * 60 });
++const archive = makeArchive([series], { createdAfterSec: 0 });
++const gone = { ...archive, oneMinute: new Map() }; // the data left the rolling window
++const episodeAt = (ts, coin = 'AAA') => buildEpisode({
++  canonicalCoin: coin, decisionTs: ts, usableAtTs: ts, datasetId: 'fixture-92', mode: 'HISTORICAL_REPLAY', evidenceBasis: 'HISTORICAL_RECONSTRUCTION',
++  fidelity: 'CANDLE_DESCRIPTIVE', featureSet: { features: {} }, gates: [], decision: 'NO_SETUP', baselineRuleVersion: BASELINE_RULE_VERSION,
++});
++
++test('FIX92-1: a SHORT-stage row whose data then leaves the window is settled by a NEW attachment (this sweep clock, superseding the old row), and the store accepts it', () => {
++  const dir = mkdtempSync(path.join(tmpdir(), 'cobra-fix92-'));
++  try {
++    const store = createLearningStore({ dataDir: dir });
++    const floor = decisionSec * 1000;
++    const e = episodeAt(floor); store.appendEpisode(e);
++    // stage 1: the short horizons are in, 60m/240m still NOT_YET_KNOWN
++    const t1 = floor + 20 * MIN;
++    const s1 = maturationSweep({ episodes: store.readEpisodes(), latestOutcomes: store.latestOutcomes(), archive, asOfTs: t1, attachedTs: t1 });
++    assert.equal(s1.attachments.length, 1, 'the SHORT-stage row');
++    assert.equal(outcomeStage(s1.attachments[0].outcomeRow), 1);
++    assert.equal(store.appendOutcome(s1.attachments[0]).appended, true);
++    const first = store.latestOutcomes().get(e.opportunityId); assert.equal(first.attachedTs, t1);
++    // the data leaves the window; the deadline passes: the sweep settles the row
++    const t2 = floor + 240 * MIN + SETTLE_GRACE_MS + 5 * MIN;
++    const s2 = maturationSweep({ episodes: store.readEpisodes(), latestOutcomes: store.latestOutcomes(), archive: gone, asOfTs: t2, attachedTs: t2 });
++    assert.equal(s2.settledAtDeadline, 1); assert.equal(s2.attachments.length, 1);
++    const settle = s2.attachments[0];
++    assert.equal(settle.attachedTs, t2, 'the settlement carries THIS sweep clock, not the old row clock');
++    assert.equal(settle.supersedes, t1, 'and names the row it supersedes');
++    assert.equal(settle.outcomeRow.horizons['240m'].state, 'CENSORED'); assert.equal(settle.outcomeRow.horizons['240m'].reason, 'SETTLED_AT_DEADLINE');
++    assert.equal(settle.outcomeRow.horizons['5m'].state, first.outcomeRow.horizons['5m'].state, 'what was known stays known');
++    const w = store.appendOutcome(settle); assert.equal(w.appended, true, 'the store writes it (before the fix: duplicate, silently dropped)');
++    assert.equal(outcomeStage(store.latestOutcomes().get(e.opportunityId).outcomeRow), 2, 'fully settled');
++    // and the episode has left the pending set for good
++    const s3 = maturationSweep({ episodes: store.readEpisodes(), latestOutcomes: store.latestOutcomes(), archive: gone, asOfTs: t2 + MIN, attachedTs: t2 + MIN });
++    assert.equal(s3.attachments.length + s3.unavailable + s3.pending + s3.settledAtDeadline, 0, 'not looked at again');
++  } finally { rmSync(dir, { recursive: true, force: true }); }
++});
++
++test('FIX92-2: stale SHORT-stage episodes no longer eat the sweep budget — a fresh look behind them is labelled', () => {
++  const dir = mkdtempSync(path.join(tmpdir(), 'cobra-fix92b-'));
++  try {
++    const store = createLearningStore({ dataDir: dir });
++    const floor = decisionSec * 1000;
++    const stale = [0, 1, 2].map((i) => episodeAt(floor + i * 1000)); for (const e of stale) store.appendEpisode(e);
++    const t1 = floor + 20 * MIN;
++    for (const a of maturationSweep({ episodes: store.readEpisodes(), latestOutcomes: store.latestOutcomes(), archive, asOfTs: t1, attachedTs: t1 }).attachments) store.appendOutcome(a);
++    assert.equal(store.latestOutcomes().size, 3, 'three SHORT-stage rows');
++    // hours later a fresh look arrives and the old data has left the window; the sweep budget is 2 per tick
++    const t2 = floor + 240 * MIN + SETTLE_GRACE_MS + 5 * MIN;
++    const fresh = episodeAt(t2 - 20 * MIN, 'AAA'); store.appendEpisode(fresh);
++    const arch = makeArchive([makeSeries('AAA', Math.floor((t2 - 60 * MIN) / 1000), 60, { drift: rallyDrift(400), volume: burstVolume(400), coverageEndSec: Math.floor((t2 - 4 * MIN) / 1000) })], { createdAfterSec: 0 });
++    const touched = new Set();
++    for (let tick = 0; tick < 4; tick += 1) {
++      const at = t2 + tick * MIN;
++      const r = maturationSweep({ episodes: store.readEpisodes(), latestOutcomes: store.latestOutcomes(), archive: arch, asOfTs: at, attachedTs: at, maxPerSweep: 2 });
++      for (const a of r.attachments) { assert.equal(store.appendOutcome(a).appended, true, `tick ${tick}: every pushed row is written`); touched.add(a.opportunityId); }
++    }
++    assert.ok(touched.has(fresh.opportunityId), 'the fresh look was reached and labelled within a few ticks');
++    for (const e of stale) assert.equal(outcomeStage(store.latestOutcomes().get(e.opportunityId).outcomeRow), 2, 'the stale rows are settled, not re-pushed forever');
++  } finally { rmSync(dir, { recursive: true, force: true }); }
++});
+-- 
+2.43.0
+
