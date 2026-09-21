@@ -60,11 +60,22 @@ Digest law: `sha256` over the sorted repository-relative file list, each entry a
 
 ```
 FROZEN_FOR_PAPER
-judge/*.js       9453d3f2016629a2a19d0ebac6c951f3a39889554b9f7ddc3e0012ce4a3cd686
+judge/*.js       b03f77e5c07fd8c1b162c5b1377e10d0b6a71a12fef2daf44e7a5efc1c1a9953
 execution/*.js   019f8fefbace35dbfeafad17b14fac47305046434315dee07edf48e0ea5d9802
 watch/watch.js   6f319a1ee72a2b43346b8d07f906bb3ca31566ca7e3be0180d57f551d8a1afe1
-all (49 files)   ef57c5ce0af99957244e1639dfe576e51eec50535a9b847717f1b86c4da1ceed
+all (49 files)   30d1e0e3b002d4ab2083ff302248d5335b3ea37539f30dc39f67035476552406
 ```
+
+### 4.46 Audited change — 2026-09-21 PUBLISH-FIX-118: the close call says the number (previous judge digest `9453d3f20166…`; now `b03f77e5c07f…`; all `ef57c5ce0af9…` → `30d1e0e3b002…`; execution and watch/watch.js UNCHANGED; 49 files)
+
+`judge/judge.js`, one log line. The first close call of the wide20 account (deployment `8be1fb2f`, 06:53) read
+`NO_ELIGIBLE_SIZE_ON_LADDER [NO_BOUNDED_FEASIBLE_LOT | NO_BOUNDED_FEASIBLE_LOT | NO_BOUNDED_FEASIBLE_LOT] (cash 500, risk
+budget 15, target 4.3189)` — three rungs of the size ladder, one word each, and not the constraint that bound any of
+them, although `evaluateSizeLadder` records each rung's `binding` (the failures the bounded search observed:
+`BUFFERED_REWARD_NEGATIVE`, `REWARD_RISK_BELOW_1_5`, `CASH`, `RISK`, …) and the decision holds the ask and the structural
+stop. The line now prints, per refused rung, `fraction: reason <- binding+binding`, and `ask … stop … target …` on both
+sizing paths. The refusal, its recording and every counter are byte-for-byte as before (`test/publish-fix-118-close-call-says-the-number.test.js`,
+3). Authority unchanged: PAPER_SIMULATION_ONLY.
 
 ### 4.45 Audited change — 2026-09-21 PUBLISH-FIX-114: one sort per book side per applied message (previous execution digest `f6421a32ef67…`; now `019f8fefbace…`; all `57e646b7dfb7…` → `ef57c5ce0af9…`; judge and watch/watch.js UNCHANGED; 49 files)
 

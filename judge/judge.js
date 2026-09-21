@@ -176,10 +176,16 @@ export function createJudge({ accountId, policy, policyDigest, dispatcher, feed,
   }
   // PUBLISH-FIX-84 (the owner's night, 2026-09-20): a look that passed EVERY gate and died at sizing is the closest he ever comes to a
   // bite, and it left one word in the log (NO_TRADE_SIZE). It now says which number stopped it, in the owner's terms.
-  function closeCall(c, setupId, reasons, detail, budget, setup) {
+  // PUBLISH-FIX-118 (2026-09-21): the first close call of the wide20 account read `NO_ELIGIBLE_SIZE_ON_LADDER [NO_BOUNDED_FEASIBLE_LOT |
+  // NO_BOUNDED_FEASIBLE_LOT | NO_BOUNDED_FEASIBLE_LOT]` — three rungs, one word each, and not the number that stopped any of them. The
+  // ladder already carries each rung's binding constraints (BUFFERED_REWARD_NEGATIVE, REWARD_RISK_BELOW_1_5, CASH, RISK ...); the line now
+  // prints them per rung, with the ask, the stop and the target, so the geometry of the refused trade is readable from the log alone.
+  function closeCall(c, setupId, reasons, detail, budget, setup, geometry = null) {
     counters.closeCalls = (counters.closeCalls ?? 0) + 1;
-    log(`CLOSE CALL: ${c.symbol} ${setupId} passed every gate; no trade size — ${reasons.join(', ')}${detail.length ? ` [${detail.join(' | ')}]` : ''} (cash ${budget?.cash ?? '?'}, risk budget ${budget?.budget ?? '?'}, target ${setup?.scenario?.target ?? '?'}${setup?.scenario?.cappedBy?.price ? ` capped by the book at ${setup.scenario.cappedBy.price}` : ''})`);
+    const geo = geometry ? ` ask ${geometry.ask ?? '?'} stop ${geometry.stop ?? '?'}` : '';
+    log(`CLOSE CALL: ${c.symbol} ${setupId} passed every gate; no trade size — ${reasons.join(', ')}${detail.length ? ` [${detail.join(' | ')}]` : ''} (cash ${budget?.cash ?? '?'}, risk budget ${budget?.budget ?? '?'},${geo} target ${setup?.scenario?.target ?? '?'}${setup?.scenario?.cappedBy?.price ? ` capped by the book at ${setup.scenario.cappedBy.price}` : ''})`);
   }
+  const rungDetail = (x) => `${x.fraction ?? '?'}: ${x.reason}${Array.isArray(x.binding) && x.binding.length ? ` <- ${x.binding.join('+')}` : ''}`;
   function secondLookMeasurement(c, setupId, episodeId) {
     const p = secondLookCfg ? c.secondLook.get(setupId) : null; if (!p || p.state !== 'CROSSED' || p.episodeId !== episodeId) return [];
     return [{ id: 'SECOND_LOOK', ok: true, value: p.looks, threshold: secondLookCfg.maxLooks, unit: 'COUNT', note: `look ${p.looks} of ${secondLookCfg.maxLooks} after a ${p.data ? 'data-only' : 'flow-only'} refusal (${p.refused.join(',')}) ${Math.round(secondLookCfg.afterMs / 60_000)} min earlier at the same level`, class: 'MEASUREMENT', ablated: false }];
@@ -501,12 +507,12 @@ export function createJudge({ accountId, policy, policyDigest, dispatcher, feed,
       };
       const ladder = evaluateSizeLadder({ snapshot: snap, spec: c.spec, fee, atr14: frozen.atr14, structuralStop: frozen.structuralStop, targetPrice: setup.scenario.target, maxEntryLevel: setup.maxEntryLevel, cashAvailable: budget.cash, riskBudget: budget.budget, fractions: dynamicSizing.fractions ?? undefined, allInEvidence: dynamicSizing.allInEvidence ?? undefined, prepared, nowTs: D });
       measurements = [...measurements, sizingMeasurement(ladder), ...sizingCandidateLog(ladder)];
-      if (!ladder.selected) { closeCall(c, setupId, ['NO_ELIGIBLE_SIZE_ON_LADDER'], ladder.candidates.filter((x) => x.status !== 'OK').slice(0, 3).map((x) => String(x.reason)).concat(ladder.candidates.filter((x) => x.status === 'OK').slice(0, 2).map((x) => `${x.whyNotSelected ?? 'NOT_SELECTED'} p=${x.bufferedScenarioNetProfit} risk=${x.scenarioStressedLoss}`)), budget, setup); tracker.decide('ENTRY_REFUSED', now()); return recordRefusal(c, setupId, episodeId, 'ENTRY_REFUSED', ['NO_TRADE_SIZE', 'NO_ELIGIBLE_SIZE_ON_LADDER'], snap, { inputMode, caseRefs, measurements, invalidation: setup.invalidation, scenario: { target: setup.scenario.target, cappedBy: setup.scenario.cappedBy?.price ?? null, kind: 'SCENARIO_NOT_FORECAST' } }); }
+      if (!ladder.selected) { closeCall(c, setupId, ['NO_ELIGIBLE_SIZE_ON_LADDER'], ladder.candidates.filter((x) => x.status !== 'OK').slice(0, 3).map(rungDetail).concat(ladder.candidates.filter((x) => x.status === 'OK').slice(0, 2).map((x) => `${x.whyNotSelected ?? 'NOT_SELECTED'} p=${x.bufferedScenarioNetProfit} risk=${x.scenarioStressedLoss}`)), budget, setup, { ask: bookFacts(snap)?.bestAsk ?? null, stop: frozen.structuralStop ?? null }); tracker.decide('ENTRY_REFUSED', now()); return recordRefusal(c, setupId, episodeId, 'ENTRY_REFUSED', ['NO_TRADE_SIZE', 'NO_ELIGIBLE_SIZE_ON_LADDER'], snap, { inputMode, caseRefs, measurements, invalidation: setup.invalidation, scenario: { target: setup.scenario.target, cappedBy: setup.scenario.cappedBy?.price ?? null, kind: 'SCENARIO_NOT_FORECAST' } }); }
       found = ladder.selected.found;
     } else {
       found = sizeSearch({ snapshot: snap, spec: c.spec, fee, atr14: frozen.atr14, structuralStop: frozen.structuralStop, targetPrice: setup.scenario.target, maxEntryLevel: setup.maxEntryLevel, cashAvailable: budget.cash, riskBudget: budget.budget });
     }
-    if (found.status !== 'OK') { closeCall(c, setupId, [found.reason, ...(found.binding ?? [])], found.evaluation ? [`p=${found.evaluation.bufferedScenarioNetProfit ?? '?'} risk=${found.evaluation.scenarioStressedLoss ?? '?'} cashOut=${found.evaluation.entryCashOut ?? '?'}`] : [], budget, setup); tracker.decide('ENTRY_REFUSED', now()); return recordRefusal(c, setupId, episodeId, 'ENTRY_REFUSED', ['NO_TRADE_SIZE', found.reason, ...(found.binding ?? [])], snap, { inputMode, caseRefs, measurements, invalidation: setup.invalidation, scenario: { target: setup.scenario.target, cappedBy: setup.scenario.cappedBy?.price ?? null, kind: 'SCENARIO_NOT_FORECAST' } }); }
+    if (found.status !== 'OK') { closeCall(c, setupId, [found.reason, ...(found.binding ?? [])], found.evaluation ? [`p=${found.evaluation.bufferedScenarioNetProfit ?? '?'} risk=${found.evaluation.scenarioStressedLoss ?? '?'} cashOut=${found.evaluation.entryCashOut ?? '?'}`] : [], budget, setup, { ask: bookFacts(snap)?.bestAsk ?? null, stop: frozen.structuralStop ?? null }); tracker.decide('ENTRY_REFUSED', now()); return recordRefusal(c, setupId, episodeId, 'ENTRY_REFUSED', ['NO_TRADE_SIZE', found.reason, ...(found.binding ?? [])], snap, { inputMode, caseRefs, measurements, invalidation: setup.invalidation, scenario: { target: setup.scenario.target, cappedBy: setup.scenario.cappedBy?.price ?? null, kind: 'SCENARIO_NOT_FORECAST' } }); }
     const e = found.evaluation;
     if (edgeStateEnabled && isEdgeSetup(setupId)) {
       const executableEdge = executableEdgeFromEvaluation({ setupId, evaluation: e, decisionTs: D });
