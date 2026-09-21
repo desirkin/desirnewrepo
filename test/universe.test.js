@@ -7,6 +7,10 @@ import path from 'node:path';
 
 const TEST_DATA = mkdtempSync(path.join(tmpdir(), 'cobra-universe-'));
 process.env.COBRA_DATA_DIR = TEST_DATA;
+// PUBLISH-FIX-103 (2026-09-21): a drill must be hermetic. lib/config.js dataDir() is COBRA_DATA_DIR + SERPENT_DATA_GENERATION,
+// and the Replit shell exports SERPENT_DATA_GENERATION=gen1 — so this drill wrote into <tmp>/gen1 and then looked in <tmp>,
+// failing on the deployment host and passing on a laptop. The generation is pinned OFF here: the drill owns its own data root.
+process.env.SERPENT_DATA_GENERATION = '';
 
 const { selectFromRaw, selectUniverse, readCurrentUniverse, catalogUsdSymbols } = await import('../tape/universe.js');
 const { classifyTape } = await import('../tape/health.js');

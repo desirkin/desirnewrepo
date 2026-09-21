@@ -40,6 +40,9 @@ test('the hot lane is bounded: a fourth nominee waits while every hot pair is in
 
 test('the current-universe record becomes a superset of the carried hot pairs; only this session\'s nominations are read', async () => {
   const dir = mkdtempSync(path.join(tmpdir(), 'serpent-hot-lane-')); const prev = process.env.COBRA_DATA_DIR; process.env.COBRA_DATA_DIR = dir;
+  // PUBLISH-FIX-103: pin the data GENERATION off too — dataDir() is COBRA_DATA_DIR + SERPENT_DATA_GENERATION, and the Replit
+  // shell exports gen1, which sent the write to <tmp>/gen1 while the read looked in <tmp>. A drill owns its own data root.
+  const prevGen = process.env.SERPENT_DATA_GENERATION; process.env.SERPENT_DATA_GENERATION = '';
   try {
     const { mergeCarriedIntoCurrentUniverse, readWideEyeNominationsToday, readCurrentUniverse, DEEP_UNIVERSE_SELECTION_VERSION } = await import('../tape/universe.js?hot-lane');
     const { sessionDate } = await import('../lib/time.js');
@@ -56,7 +59,7 @@ test('the current-universe record becomes a superset of the carried hot pairs; o
     assert.deepEqual(readWideEyeNominationsToday(), [], 'a previous session\'s proposals are not hot today');
     writeFileSync(path.join(dir, 'survey', 'nominations-current.json'), JSON.stringify({ date: sessionDate(), nominations: [{ coin: 'PUMP', ts: 'now' }] }));
     assert.deepEqual(readWideEyeNominationsToday(), [{ coin: 'PUMP', ts: 'now' }]);
-  } finally { if (prev === undefined) delete process.env.COBRA_DATA_DIR; else process.env.COBRA_DATA_DIR = prev; rmSync(dir, { recursive: true, force: true }); }
+  } finally { if (prev === undefined) delete process.env.COBRA_DATA_DIR; else process.env.COBRA_DATA_DIR = prev; if (prevGen === undefined) delete process.env.SERPENT_DATA_GENERATION; else process.env.SERPENT_DATA_GENERATION = prevGen; rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('the Judge law already puts a newcomer first: a pair first seen now outranks every standing tenant and takes a slot at once (the oldest tenant is preempted)', () => {
