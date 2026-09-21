@@ -1,0 +1,153 @@
+From 9b4066e55c458d63358448de117dfb24482212e1 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 21 Sep 2026 04:05:36 +0000
+Subject: [PATCH] PUBLISH-FIX-109: ghost candidates - the top refusal in the
+ app was no book
+
+Owner directive: "No blocks. Trace that line from end to end."
+
+Live, eb532bba, one 15-minute window after the stage widened to twenty:
+
+  JUDGE FUNNEL: 19 candidates; crossings 201 -> confirmations 64
+                -> decisions 48, entries 0
+  top refusals: FEED_NOT_IN_TAPE_UNIVERSE 36, FI15 22,
+                PRIOR_MID_RESPONSE_SMALL 19, RV60 18, ...
+
+The most common refusal in the whole application was not a gate. The
+volatility watch ranks ~90 movers; the deep tape has 20 slots. The
+Judge was offered the whole ranked list, admitted coins with no order
+book, burned a preparation slot on each, and refused them for the only
+reason it could - there was nothing to look at. Nineteen candidates
+where twenty were prepared: seats held by ghosts while runners with
+live books waited.
+
+The tape's current-universe record is the truth about what has a book
+(tape/run.js re-merges the carried hot pairs after every selection), so
+the extra sources are filtered against it. Nothing judgeable is
+dropped: a mover with no book is not a missed opportunity, it is a
+nomination the Judge cannot act on. An empty or unreadable record falls
+back to the old unfiltered list, so a boot never nominates nothing.
+Adoption is untouched - the hot lane reads the watch picks itself every
+15 s (FIX-102), never through this path - so a runner gets its book on
+the next adoption pass and the Judge on the pass after, with a free
+slot waiting. What is withheld is counted and printed: OFF-TAPE: n.
+
+Also: the second look showed `flow-only refusals 20 -> armed 0,
+dropped 0` and the missing word was `superseded` - a natural re-crossing
+beat the retake to it, which is the BETTER outcome and was uncounted in
+the line. The counter always existed; now it is printed.
+
+Fenced by test/publish-fix-109-no-ghost-candidates.test.js (6).
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01RoFoPS22WFW1oUnbWzPayd
+---
+ fly.js                                        | 15 ++++-
+ ...ublish-fix-109-no-ghost-candidates.test.js | 62 +++++++++++++++++++
+ 2 files changed, 75 insertions(+), 2 deletions(-)
+ create mode 100644 test/publish-fix-109-no-ghost-candidates.test.js
+
+diff --git a/fly.js b/fly.js
+index ec57cd8..d977e0f 100644
+--- a/fly.js
++++ b/fly.js
+@@ -315,7 +315,18 @@ if (SERPENT_MODE === 'DATA_ONLY') {
+   let scoutSource = null; let scoutTimer = null; // PUBLISH-FIX-74: Socrates' audibles (sealed upward cases -> the Judge's watch; authority NONE)
+   // PUBLISH-FIX-66: the VOLATILITY WATCH's picks carry an entry clock and so take the preparation slots ahead of the standing universe
+   let neverWatchDropped = 0;
+-  const judgeNominations = () => { const u = readCurrentUniverse(); const base = (u?.pairs ?? []).map((p) => ({ symbol: p.symbol, assetId: p.coin })); let extra = []; try { extra = relookSource ? relookSource.nominations() : []; } catch { extra = []; } let movers = []; try { movers = volatilityWatch ? volatilityWatch.nominations() : []; } catch { movers = []; } let audibles = []; try { audibles = scoutSource ? scoutSource.nominations() : []; } catch { audibles = []; } const all = filterNominations([...audibles, ...movers, ...extra, ...base], neverWatch); neverWatchDropped = all.dropped?.length ?? 0; return all; };
++  let judgeNominationsOffTape = 0; // PUBLISH-FIX-109: nominations withheld because the tape carries no book for them
++  // PUBLISH-FIX-109 (2026-09-21): the Judge was offered coins the TAPE DOES NOT CARRY. The watch ranks ~90 movers and the deep
++  // tape has 20 slots, so most of the movers list has no order book — and the Judge admitted them anyway, burned one of its
++  // twenty preparation slots on each, and refused them FEED_NOT_IN_TAPE_UNIVERSE. Live, deployment eb532bba, one 15-minute
++  // window: `top refusals: FEED_NOT_IN_TAPE_UNIVERSE 36` — the single most common refusal in the app, ahead of every real gate,
++  // and `19 candidates` where twenty were prepared: slots held by coins that could never be judged.
++  // The tape's own current-universe record is the truth about what has a book (tape/run.js re-merges the carried hot pairs into
++  // it after every selection), so the extra sources are filtered against it. This drops NOTHING that could have been judged: a
++  // mover with no book is not a missed opportunity, it is a nomination the Judge is arithmetically unable to act on. Adoption is
++  // unaffected — the hot lane reads the watch's picks directly (PUBLISH-FIX-102, every 15 s), never through here — so a runner
++  // still gets its book on the next adoption pass and reaches the Judge on the pass after that, with a slot free for it.
++  const judgeNominations = () => { const u = readCurrentUniverse(); const carried = new Set((u?.pairs ?? []).map((p) => p.symbol)); const base = (u?.pairs ?? []).map((p) => ({ symbol: p.symbol, assetId: p.coin })); let extra = []; try { extra = relookSource ? relookSource.nominations() : []; } catch { extra = []; } let movers = []; try { movers = volatilityWatch ? volatilityWatch.nominations() : []; } catch { movers = []; } let audibles = []; try { audibles = scoutSource ? scoutSource.nominations() : []; } catch { audibles = []; } const onTape = (n) => n && typeof n.symbol === 'string' && carried.has(n.symbol); const offered = carried.size ? [...audibles.filter(onTape), ...movers.filter(onTape), ...extra.filter(onTape), ...base] : [...audibles, ...movers, ...extra, ...base]; judgeNominationsOffTape = (audibles.length + movers.length + extra.length) - (offered.length - base.length); const all = filterNominations(offered, neverWatch); neverWatchDropped = all.dropped?.length ?? 0; return all; };
+   if (process.env.JUDGE_ENABLED === 'true') {
+     try {
+       const { composeJudge, loadSpecs } = await import('./judge/composition.js');
+@@ -559,7 +570,7 @@ if (SERPENT_MODE === 'DATA_ONLY') {
+           // bytes carried: the whole account state travels twice per commit) vs plain queries (the tape) — and the pool gauge
+           let dbClocks = '';
+           try { const c = getPersistence()?.db?.clocks?.() ?? null; if (c) { const kb = (x) => (x && Number.isFinite(x.p50) ? `p50 ${Math.round(x.p50 / 1024)} / max ${Math.round(x.max / 1024)} KB` : 'no samples'); dbClocks = `; DB: tx ${ms(c.tx)} (statements/tx p50 ${c.txStatements?.p50 ?? '?'}, bytes/tx ${kb(c.txParamBytes)}); pool checkout wait ${ms(c.checkoutWait)} (failures ${c.checkoutFailures}, retried ${c.checkoutRetries ?? 0}); query ${ms(c.query)}; pool ${c.pool?.total ?? '?'} open / ${c.pool?.idle ?? '?'} idle / ${c.pool?.waiting ?? '?'} waiting of ${c.pool?.max} (${c.pool?.lockSessions} held for life by locks)${c.slowestTx ? `; slowest tx ${c.slowestTx.ms} ms, ${c.slowestTx.statements} statements, ${Math.round(c.slowestTx.paramBytes / 1024)} KB, began '${c.slowestTx.first}'` : ''}`; } } catch (err) { dbClocks = `; DB clocks unavailable (${String(err?.message ?? err).slice(0, 80)})`; }
+-          console.log(`JUDGE FUNNEL: ${st.candidates} candidates; books ${k.books ?? 0}${d('books')}, trades ${k.trades ?? 0}${d('trades')}; crossings ${k.crossings ?? 0}${d('crossings')} -> confirmations ${k.confirmations ?? 0}${d('confirmations')} -> expired ${k.expired ?? 0}${d('expired')} (queue-delay expired ${k.queueDelayExpired ?? 0}); decisions ${k.decisions ?? 0}${d('decisions')}, entries ${k.entries ?? 0}${d('entries')}, close calls (every gate passed, no size) ${k.closeCalls ?? 0}${d('closeCalls')}, blocked by a CONTROL after sizing ${k.restrictionRefusals ?? 0}${Object.keys(k.restrictionReasons ?? {}).length ? ` [${Object.entries(k.restrictionReasons).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([r, n]) => `${r} ${n}`).join(', ')}]` : ''}, needs-data ${k.needsData ?? 0}, stale re-offered ${k.staleReoffered ?? 0}, lock waits ${k.lockWaits ?? 0} / re-offered ${k.lockReoffered ?? 0} / appends ${k.lockBatches ?? 0} / coalesced ${k.lockCoalesced ?? 0}; move-too-old ${k.moveTooOld ?? 0}; SECOND LOOK: flow-only refusals ${k.flowOnlyRefusals ?? 0} -> looks retaken ${k.secondLookCrossings ?? 0} (armed ${k.secondLooksArmed ?? 0}, dropped ${k.secondLooksDropped ?? 0}, data looks ${k.dataLooksScheduled ?? 0}); chains ended by: ${Object.entries(k.secondLookEndedBy ?? {}).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([g, n]) => `${g} ${n}`).join(', ') || 'nothing'}; last-256 by status ${JSON.stringify(byStatus)}; top refusals: ${refusals}; top crossers: ${crossers}${clocks}${dbClocks}; ${loopLag.line()}; ${relookSource ? relookSource.line() : 'LEARNED RE-LOOK: not started'}; ${volatilityWatch ? volatilityWatch.line() : 'VOLATILITY WATCH: not started'}; ${moveClockLesson ? moveClockLesson.line() : 'MOVE CLOCK: not started'}; ${scoutSource ? scoutSource.line() : 'SOCRATES SCOUT: not started'}${neverWatch.size ? `; NEVER-WATCH: ${[...neverWatch].join(',')} (${neverWatchDropped} nominations dropped at the last pass)` : ''}`);
++          console.log(`JUDGE FUNNEL: ${st.candidates} candidates; books ${k.books ?? 0}${d('books')}, trades ${k.trades ?? 0}${d('trades')}; crossings ${k.crossings ?? 0}${d('crossings')} -> confirmations ${k.confirmations ?? 0}${d('confirmations')} -> expired ${k.expired ?? 0}${d('expired')} (queue-delay expired ${k.queueDelayExpired ?? 0}); decisions ${k.decisions ?? 0}${d('decisions')}, entries ${k.entries ?? 0}${d('entries')}, close calls (every gate passed, no size) ${k.closeCalls ?? 0}${d('closeCalls')}, blocked by a CONTROL after sizing ${k.restrictionRefusals ?? 0}${Object.keys(k.restrictionReasons ?? {}).length ? ` [${Object.entries(k.restrictionReasons).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([r, n]) => `${r} ${n}`).join(', ')}]` : ''}, needs-data ${k.needsData ?? 0}, stale re-offered ${k.staleReoffered ?? 0}, lock waits ${k.lockWaits ?? 0} / re-offered ${k.lockReoffered ?? 0} / appends ${k.lockBatches ?? 0} / coalesced ${k.lockCoalesced ?? 0}; move-too-old ${k.moveTooOld ?? 0}; SECOND LOOK: flow-only refusals ${k.flowOnlyRefusals ?? 0} -> looks retaken ${k.secondLookCrossings ?? 0} (armed ${k.secondLooksArmed ?? 0}, dropped ${k.secondLooksDropped ?? 0}, superseded by a natural re-cross ${k.secondLooksSuperseded ?? 0}, data looks ${k.dataLooksScheduled ?? 0}); chains ended by: ${Object.entries(k.secondLookEndedBy ?? {}).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([g, n]) => `${g} ${n}`).join(', ') || 'nothing'}; last-256 by status ${JSON.stringify(byStatus)}; top refusals: ${refusals}; top crossers: ${crossers}${clocks}${dbClocks}; ${loopLag.line()}; ${relookSource ? relookSource.line() : 'LEARNED RE-LOOK: not started'}; ${volatilityWatch ? volatilityWatch.line() : 'VOLATILITY WATCH: not started'}; ${moveClockLesson ? moveClockLesson.line() : 'MOVE CLOCK: not started'}; ${scoutSource ? scoutSource.line() : 'SOCRATES SCOUT: not started'}${neverWatch.size ? `; NEVER-WATCH: ${[...neverWatch].join(',')} (${neverWatchDropped} nominations dropped at the last pass)` : ''}${judgeNominationsOffTape > 0 ? `; OFF-TAPE: ${judgeNominationsOffTape} nominations withheld at the last pass (no order book yet; the hot lane adopts every 15 s)` : ''}`);
+         } catch (err) { console.error(`JUDGE FUNNEL line: ${err.message}`); }
+       };
+       const runOnce = () => recorder.tick().then((summary) => { runResearch(); logLedger(summary); logFunnel(); }).catch((err) => console.error(`LEARNING DATA CLOCK tick: ${err.message}`));
+diff --git a/test/publish-fix-109-no-ghost-candidates.test.js b/test/publish-fix-109-no-ghost-candidates.test.js
+new file mode 100644
+index 0000000..298d41d
+--- /dev/null
++++ b/test/publish-fix-109-no-ghost-candidates.test.js
+@@ -0,0 +1,62 @@
++// PUBLISH-FIX-109 (2026-09-21, owner directive: "No blocks. Trace that line from end to end").
++//
++// The single most common refusal in the whole application was not a gate. Live, deployment eb532bba, one 15-minute window
++// after the stage widened to twenty:
++//
++//     JUDGE FUNNEL: 19 candidates; crossings 201 -> confirmations 64 -> decisions 48, entries 0
++//     top refusals: FEED_NOT_IN_TAPE_UNIVERSE 36, FI15 22, PRIOR_MID_RESPONSE_SMALL 19, RV60 18, ...
++//
++// `FEED_NOT_IN_TAPE_UNIVERSE` ahead of every real gate, and nineteen candidates where twenty were prepared. The volatility
++// watch ranks about ninety movers; the deep tape has twenty slots. The Judge was being offered the whole ranked list, admitted
++// coins with no order book, burned a preparation slot on each, and refused them for the only reason it could — there was
++// nothing to look at. Ghost candidates, holding seats that runners with live books were waiting for.
++//
++// The tape's own current-universe record is the truth about what has a book (tape/run.js re-merges the carried hot pairs into
++// it after every selection), so the extra nomination sources are filtered against it. Nothing judgeable is dropped: a mover
++// with no book is not a missed opportunity, it is a nomination the Judge is arithmetically unable to act on. Adoption is
++// untouched — the hot lane reads the watch's picks directly every 15 s (PUBLISH-FIX-102), never through this path.
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import { readFileSync } from 'node:fs';
++
++const SRC = readFileSync('fly.js', 'utf8');
++const LINE = SRC.split('\n').find((l) => l.includes('const judgeNominations = ()')) ?? '';
++
++test('FIX109-1: the Judge is offered only coins the tape actually carries', () => {
++  assert.ok(LINE, 'the nomination assembly is still one line in fly.js');
++  assert.match(LINE, /const carried = new Set\(\(u\?\.pairs \?\? \[\]\)\.map\(\(p\) => p\.symbol\)\)/, 'the tape record is the truth about what has a book');
++  assert.match(LINE, /const onTape = \(n\) => n && typeof n\.symbol === 'string' && carried\.has\(n\.symbol\)/);
++  assert.match(LINE, /audibles\.filter\(onTape\), \.\.\.movers\.filter\(onTape\), \.\.\.extra\.filter\(onTape\)/, 'every EXTRA source is filtered');
++});
++
++test('FIX109-2: the tape record being empty or unreadable never silences the Judge', () => {
++  // a boot before the first universe write, or a failed merge, must fall back to the old behaviour rather than nominating nothing
++  assert.match(LINE, /carried\.size \? \[[^\]]*\] : \[\.\.\.audibles, \.\.\.movers, \.\.\.extra, \.\.\.base\]/, 'no record -> the unfiltered list, exactly as before');
++});
++
++test('FIX109-3: the base universe is never filtered — it IS the tape', () => {
++  const offered = LINE.slice(LINE.indexOf('const offered ='), LINE.indexOf('judgeNominationsOffTape'));
++  assert.ok(offered.includes('...base]'), 'base rides through whole');
++  assert.equal(offered.includes('base.filter(onTape)'), false, 'filtering the tape against itself would be nonsense');
++});
++
++test('FIX109-4: what is withheld is COUNTED and said out loud', () => {
++  assert.match(SRC, /let judgeNominationsOffTape = 0;/);
++  assert.match(SRC, /OFF-TAPE: \$\{judgeNominationsOffTape\} nominations withheld at the last pass/);
++  assert.match(SRC, /the hot lane adopts every 15 s/, 'and the line says why it is temporary, not a loss');
++});
++
++test('FIX109-5: the second look now reports the outcome that was invisible', () => {
++  // 20 flow-only refusals, 0 armed, 0 dropped: the missing word was `superseded` — a natural re-crossing beat the retake to it,
++  // which is the better outcome and was silently uncounted in the line.
++  assert.match(SRC, /superseded by a natural re-cross \$\{k\.secondLooksSuperseded \?\? 0\}/);
++  const judge = readFileSync('judge/judge.js', 'utf8');
++  assert.match(judge, /counters\.secondLooksSuperseded = \(counters\.secondLooksSuperseded \?\? 0\) \+ 1/, 'the counter it reports has always existed');
++});
++
++test('FIX109-6: adoption is untouched — a runner with no book still gets one', () => {
++  const tape = readFileSync('tape/run.js', 'utf8');
++  assert.match(tape, /readVolatilityWatchNow\(\{ dataDir: dataDir\(\) \}\)/, 'the hot lane still reads the watch picks itself');
++  assert.match(tape, /const hotLaneTimer = setInterval\(\(\) => \{ adoptHotNominations\(\)\.catch\(\(\) => \{\}\); \}, 15_000\);/);
++  assert.equal(SRC.includes('adoptHotNominations'), false, 'the Judge nomination path has nothing to do with adoption');
++});
+-- 
+2.43.0
+
