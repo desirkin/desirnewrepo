@@ -86,7 +86,7 @@ test('FIX94-6 (the shipped bars): the defaults are the $500-account floors, not 
   assert.equal(VOLATILITY_WATCH_DEFAULTS.minBars, 5); assert.equal(VOLATILITY_WATCH_DEFAULTS.minUsdVol1h, 10_000); assert.equal(VOLATILITY_WATCH_DEFAULTS.minTrades1h, 10);
   assert.equal(VOLATILITY_WATCH_DEFAULTS.liquidityRefUsd, 10_000); assert.equal(VOLATILITY_WATCH_DEFAULTS.tradesRef1h, 60);
   assert.equal(VOLATILITY_WATCH_DEFAULTS.maxStaleMin, 20); assert.equal(VOLATILITY_WATCH_DEFAULTS.sourceStaleMin, 5);
-  assert.equal(VOLATILITY_WATCH_DEFAULTS.picks, 6); assert.equal(VOLATILITY_WATCH_DEFAULTS.band, 12); assert.equal(VOLATILITY_WATCH_DEFAULTS.minRange1hPct, 0.8);
+  assert.equal(VOLATILITY_WATCH_DEFAULTS.picks, 20, 'PUBLISH-FIX-99: the order-book stage widened 6 -> 20 on measured headroom (event-loop utilisation 88-91% -> 56-61% after FIX-97); the Judge still prepares six, now the best six OF TWENTY'); assert.equal(VOLATILITY_WATCH_DEFAULTS.band, 30); assert.equal(VOLATILITY_WATCH_DEFAULTS.minRange1hPct, 0.8);
 });
 
 // ---- PUBLISH-FIX-95 (2026-09-21): the nomination floor, the second door ------------------------------------------------------

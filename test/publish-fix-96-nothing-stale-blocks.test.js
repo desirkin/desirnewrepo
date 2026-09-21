@@ -67,5 +67,5 @@ test('FIX96-5: the shipped law — a thrash guard in minutes, and the config car
   assert.deepEqual(HOT_LANE_DEFAULTS, { slots: 3, minHoldMs: 10 * MIN });
   assert.equal('tenureMs' in HOT_LANE_DEFAULTS, false, 'the two-hour lease is gone, not renamed');
   const { loadConfig } = await import('../lib/config.js');
-  assert.deepEqual(loadConfig().universeExpansion.hotLane, { slots: 6, minHoldMs: 10 * MIN });
+  assert.deepEqual(loadConfig().universeExpansion.hotLane, { slots: 20, minHoldMs: 10 * MIN }); // PUBLISH-FIX-99: the order-book stage widened 6 -> 20 on measured headroom (event-loop utilisation 88-91% -> 56-61% after FIX-97); the Judge still prepares six, now the best six OF TWENTY
 });

@@ -34,8 +34,13 @@ export const VOLATILITY_WATCH_SOURCE = 'VOLATILITY_WATCH';
 //      run begin; the window is anchored at NOW (not at the coin's last candle), so an old spike on a coin that then went dead cannot rank.
 // The Judge is unchanged and remains the real gate: every nominee still faces its frozen book-depth, cost and sizing law on the live book.
 export const VOLATILITY_WATCH_DEFAULTS = Object.freeze({
-  picks: 6,               // the Judge's preparation slots
-  band: 12,               // a listed coin stays while it is still inside the top `band` (hysteresis against churn)
+  // PUBLISH-FIX-99 (2026-09-21, owner: "why can't it have 600 not six ... let it start with 600 and the ones that make it through make
+  // it through"). `picks` was sized to the JUDGE's six preparation slots, but the watch does not feed the Judge — it feeds the TAPE, and
+  // the Judge then prepares its best six from everything the tape carries. Tying the two together meant the Judge chose six out of six.
+  // The whole catalog is already screened on cheap 1-minute candles (612 swept, ~90 ranked); this is the width of the ORDER-BOOK stage,
+  // and after PUBLISH-FIX-97 took the process from 88-91% event-loop utilisation to 56-61% there is room for it.
+  picks: 20,              // movers offered to the tape's hot lane (it applies its own bound)
+  band: 30,               // a listed coin stays while it is still inside the top `band` (hysteresis against churn)
   windowMin: 60,          // the hour that is ranked (anchored at now)
   longWindowMin: 240,     // the four-hour range, reported beside it
   minBars: 5,             // PUBLISH-FIX-94: minutes with a candle inside the window before a range is measured (was 30: blind to the first half hour of a run)

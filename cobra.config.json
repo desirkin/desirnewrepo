@@ -56,7 +56,7 @@
       "maxLoopLagMs": 1000,
       "shedFraction": 0.15
     },
-    "hotLane": { "slots": 6, "minHoldMs": 600000 }
+    "hotLane": { "slots": 20, "minHoldMs": 600000 }
   },
   "tape": {
     "wsUrl": "wss://ws.kraken.com/v2",

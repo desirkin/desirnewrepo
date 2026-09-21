@@ -350,6 +350,21 @@ nothing (heavy selling +0.06% at 15 minutes, strong buying +0.07%). A line someb
   no scores anywhere the PUBLISH-FIX-96 order stands — oldest first — so nothing regresses. Held/pending exposure is still never
   evicted; the Judge's law is untouched. Tests: publish-fix-98-fitness-funnel (6; 5 fail on the previous code). Green:
   learning-volatility-watch, publish-fix-94, publish-fix-96, tape-hot-lane, coin-dossier, social-4f-scope, learning-mover-study.
+- `learning/volatility-watch.js` + `cobra.config.json` (PUBLISH-FIX-99, 2026-09-21; owner: "why can't it have 600 not six honestly
+  why can't you build that? ... let it start with 600 and the ones that make it through make it through"): the ORDER-BOOK stage
+  widens 6 -> 20 (universeExpansion.hotLane.slots, audited in the SCOPE-5 fence) and the watch offers 20 movers with a band of 30
+  (was 6 / 12). The screening stage was always the whole catalog — the wide eye sweeps all 612 USD pairs and the collector streams
+  1-minute candles for the accepted catalog, ~90 ranked per refresh — so "six" was never the width of the funnel, only of its last
+  chamber, where a live L2 order book is required because that is what proves the protective exit at depth. Six was chosen when the
+  process sat at 88-91% event-loop utilisation with 78% of its busy time inside fsync; PUBLISH-FIX-97 measured the same workload at
+  **56-61%** (`CPU LOAD 60s: busy 33343ms idle 26657ms`, deployment ac337e1f), so the headroom is real and measured rather than
+  assumed. `picks` was also mis-scoped: it had been sized to the JUDGE's six preparation slots, but the watch feeds the TAPE and the
+  Judge then prepares its best six from everything the tape carries — tying them together meant the Judge chose six out of six. It
+  now chooses the best six OF TWENTY, ordered by PUBLISH-FIX-98 fitness. policy.universe.preparationSlots / maxCandidates are
+  UNCHANGED at 6: the account policy is immutable (a byte change means a new account), and no policy byte was touched. Tests: the
+  shipped-constant guards in publish-fix-94 (FIX94-6), publish-fix-96 (FIX96-5) and learning-volatility-watch (VW-04) caught the
+  change and were updated with the reason — which is what they were written for. Green: social-4f-scope, learning-volatility-watch,
+  publish-fix-94, publish-fix-96, publish-fix-98, tape-hot-lane, coin-dossier.
 - `tools/gate-study-process.js` / `tools/gate-study-child.js`: the join runs in a child process every 30 minutes (90 s
   after boot first); the main thread never reads the ledger; the lesson lands in `data/learning/gate-lessons/lesson.json`
   (+ `state.json` with the proposal history). `fly.js` composes the reader as the Judge's port.
