@@ -43,9 +43,24 @@ export function nearestResistanceAbove(bars, entry, { referenceTs = null, minAbo
 export function dedupTrades(trades) { const seen = new Set(); const out = []; let dropped = 0; for (const t of trades) { const k = t.nativeTradeId ?? `${t.eventTs}|${t.price}|${t.qty}|${t.side}`; if (seen.has(k)) { dropped += 1; continue; } seen.add(k); out.push(t); } return { trades: out, duplicatesDropped: dropped }; }
 const validEpoch = (v) => Number.isSafeInteger(v) && v >= 0;
 const validTradeClock = (t) => Number.isSafeInteger(t?.eventTs) && t.eventTs >= 0 && Number.isSafeInteger(t?.receiptTs) && t.receiptTs >= 0 && t.eventTs <= t.receiptTs;
-function queryEpoch(trades, startTs, endTs, asOfTs, requested) {
+// PUBLISH-FIX-111 (2026-09-21): every window query scanned the WHOLE retained trade array — 25 minutes of prints — to find a
+// 15-second window, twice (queryEpoch, then the filter), with decimal-string arithmetic per print. windowFacts asks for four
+// imbalance windows, a vwap and RV60's twenty-one trailing windows, up to four times a second per candidate, for twenty
+// candidates. Production 2b2047d0 at 04:19, the sampled minute at 100% busy: `cmp 13% · parseDecimal 8% · fromNumberLexeme 6%
+// · windowFacts 5% · parseDecimalUncached 4% · onBook 3%` — the flow windows were the main thread, and the cost rose with the
+// trade rate, i.e. exactly when a runner runs. The lower bound is EXACT, not approximate: validTradeClock (enforced by
+// add() at insertion) guarantees eventTs <= receiptTs, so a print with eventTs >= startTs has receiptTs >= startTs, and the
+// tracker's array is in receipt order (appended as received, trimmed from the front). Skipping every print whose receiptTs is
+// below startTs therefore skips only prints that could never be in the window. The tracker says so with `sortedByReceipt`;
+// a plain array without the hint is scanned from the start exactly as before, so every other caller is unchanged.
+function lowerBoundByReceipt(trades, startTs) {
+  let lo = 0; let hi = trades.length;
+  while (lo < hi) { const mid = (lo + hi) >>> 1; const r = trades[mid]?.receiptTs; if (Number.isSafeInteger(r) && r < startTs) lo = mid + 1; else hi = mid; }
+  return lo;
+}
+function queryEpoch(trades, startTs, endTs, asOfTs, requested, fromIndex = 0) {
   const epochs = new Set();
-  for (const t of trades) {
+  for (let i = fromIndex; i < trades.length; i += 1) { const t = trades[i];
     if (t?.fromSubscriptionSnapshot === true) continue;
     if (t?.fromSubscriptionSnapshot !== false || !Number.isSafeInteger(t.eventTs) || t.eventTs < 0) return { ok: false, epoch: null, reason: 'TRADE_INVALID' };
     if (t.eventTs < startTs || t.eventTs >= endTs) continue;
@@ -55,10 +70,13 @@ function queryEpoch(trades, startTs, endTs, asOfTs, requested) {
   if (requested !== null && requested !== undefined) return validEpoch(requested) ? { ok: true, epoch: requested } : { ok: false, epoch: null, reason: 'EPOCH_INVALID' };
   return epochs.size <= 1 ? { ok: true, epoch: epochs.size ? epochs.values().next().value : null } : { ok: false, epoch: null, reason: 'EPOCH_AMBIGUOUS' };
 }
-function tradesAsOf(trades, startTs, endTs, { asOfTs = endTs, feedEpoch = null } = {}) {
+function tradesAsOf(trades, startTs, endTs, { asOfTs = endTs, feedEpoch = null, sortedByReceipt = false } = {}) {
   if (!Array.isArray(trades) || !Number.isSafeInteger(startTs) || !Number.isSafeInteger(endTs) || !Number.isSafeInteger(asOfTs) || startTs > endTs) return { ok: false, trades: [] };
-  const resolved = queryEpoch(trades, startTs, endTs, asOfTs, feedEpoch); if (!resolved.ok) return { ok: false, trades: [] };
-  return { ok: true, trades: trades.filter((t) => t?.fromSubscriptionSnapshot === false && validTradeClock(t) && validEpoch(t.feedEpoch) && t.receiptTs <= asOfTs && t.eventTs >= startTs && t.eventTs < endTs && (resolved.epoch === null || t.feedEpoch === resolved.epoch)) };
+  const from = sortedByReceipt === true ? lowerBoundByReceipt(trades, startTs) : 0; // PUBLISH-FIX-111: exact, see above
+  const resolved = queryEpoch(trades, startTs, endTs, asOfTs, feedEpoch, from); if (!resolved.ok) return { ok: false, trades: [] };
+  const out = [];
+  for (let i = from; i < trades.length; i += 1) { const t = trades[i]; if (t?.fromSubscriptionSnapshot === false && validTradeClock(t) && validEpoch(t.feedEpoch) && t.receiptTs <= asOfTs && t.eventTs >= startTs && t.eventTs < endTs && (resolved.epoch === null || t.feedEpoch === resolved.epoch)) out.push(t); }
+  return { ok: true, trades: out };
 }
 // PUBLISH-FIX-83 (full review item 8): a flow imbalance over 1-3 prints is a coin flip (one $3 taker sell -> -1 -> refused; 369 scored
 // looks showed zero separation). With { minTrades, maxWindowMs } the window is widened backwards (x2, x4 ... up to maxWindowMs) until
@@ -93,10 +111,11 @@ export function relativeVolume60(trades, decisionTs, coverage) {
   const coverageClockValid = coverage && coverage.continuous === true && Number.isSafeInteger(coverage.startTs) && coverage.startTs >= 0 && Number.isSafeInteger(coverage.endTs) && coverage.endTs >= 0 && coverage.startTs <= coverage.endTs && coverage.endTs <= decisionTs && historicalGap;
   const need = { startTs: E - 21 * BAR_MS, endTs: E };
   if (!coverageClockValid || coverage.startTs > need.startTs || coverage.endTs < need.endTs - RV60_COVERAGE_LAG_MS) return unknown('COVERAGE_INCOMPLETE');
-  const resolved = queryEpoch(trades, need.startTs, need.endTs, decisionTs, coverage.epoch); if (!resolved.ok) return unknown(resolved.reason === 'TRADE_INVALID' ? 'INPUT_INVALID' : 'EPOCH_AMBIGUOUS');
+  const sortedByReceipt = coverage.sortedByReceipt === true; const from = sortedByReceipt ? lowerBoundByReceipt(trades, need.startTs) : 0; // PUBLISH-FIX-111
+  const resolved = queryEpoch(trades, need.startTs, need.endTs, decisionTs, coverage.epoch, from); if (!resolved.ok) return unknown(resolved.reason === 'TRADE_INVALID' ? 'INPUT_INVALID' : 'EPOCH_AMBIGUOUS');
   // PUBLISH-FIX-83 (full review item 26): the 21 windows are summed in ONE pass over the selected trades (it was 21 full passes with
   // BigInt adds, ~18 ms per call at 20k trades — ~430 ms/s once liquid coins sit in the slots); same windows, same law, same values
-  const query = { asOfTs: decisionTs, feedEpoch: resolved.epoch }; const selected = tradesAsOf(trades, need.startTs, need.endTs, query); const sums = new Array(21).fill('0'); const counts = new Array(21).fill(0);
+  const query = { asOfTs: decisionTs, feedEpoch: resolved.epoch, sortedByReceipt }; const selected = tradesAsOf(trades, need.startTs, need.endTs, query); const sums = new Array(21).fill('0'); const counts = new Array(21).fill(0);
   for (const t of selected.trades) { const k = Math.floor((E - t.eventTs - 1) / BAR_MS); if (k < 0 || k > 20) continue; sums[k] = M.add(sums[k], t.quoteNotional); counts[k] += 1; }
   const numerator = { notional: sums[0], count: counts[0] }; const base = sums.slice(1);
   const sorted = [...base].sort((a, b) => M.cmp(a, b)); const median = M.div(M.add(sorted[9], sorted[10]), '2', 8, 'HALF_UP');
@@ -137,13 +156,16 @@ export const medianDecimal = (list) => {
 // ---- bounded incremental tracker: trades expire on time advance even without a new trade; a coverage change invalidates ----------
 export function createFlowTracker({ retentionMs = 22 * BAR_MS, maxTrades = 50_000 } = {}) {
   const trades = []; const ids = new Set(); let dropped = 0; let overflow = 0; let epoch = null; let epochChanges = 0; let lastTs = 0;
+  // PUBLISH-FIX-111: true while every print was appended in receipt order (the feed's receipt clock is monotone; a print that
+  // arrives with an EARLIER receiptTs than its predecessor turns the hint off for good — correctness first, speed second)
+  let sortedByReceipt = true; let lastReceiptTs = -1; let disorder = 0;
   return {
-    add(t) { if (t?.fromSubscriptionSnapshot !== false || !validTradeClock(t) || !validEpoch(t.feedEpoch)) return false; if (epoch !== null && t.feedEpoch < epoch) return false; if (epoch !== null && t.feedEpoch > epoch) { epochChanges += 1; trades.length = 0; ids.clear(); lastTs = 0; } epoch = t.feedEpoch; const k = t.nativeTradeId ?? `${t.eventTs}|${t.price}|${t.qty}|${t.side}`; if (ids.has(k)) { dropped += 1; return false; } ids.add(k); trades.push(t); lastTs = Math.max(lastTs, t.eventTs); if (trades.length > maxTrades) { const gone = trades.shift(); ids.delete(gone.nativeTradeId ?? `${gone.eventTs}|${gone.price}|${gone.qty}|${gone.side}`); overflow += 1; } return true; },
+    add(t) { if (t?.fromSubscriptionSnapshot !== false || !validTradeClock(t) || !validEpoch(t.feedEpoch)) return false; if (epoch !== null && t.feedEpoch < epoch) return false; if (epoch !== null && t.feedEpoch > epoch) { epochChanges += 1; trades.length = 0; ids.clear(); lastTs = 0; lastReceiptTs = -1; sortedByReceipt = true; } epoch = t.feedEpoch; const k = t.nativeTradeId ?? `${t.eventTs}|${t.price}|${t.qty}|${t.side}`; if (ids.has(k)) { dropped += 1; return false; } ids.add(k); if (t.receiptTs < lastReceiptTs) { sortedByReceipt = false; disorder += 1; } lastReceiptTs = Math.max(lastReceiptTs, t.receiptTs); trades.push(t); lastTs = Math.max(lastTs, t.eventTs); if (trades.length > maxTrades) { const gone = trades.shift(); ids.delete(gone.nativeTradeId ?? `${gone.eventTs}|${gone.price}|${gone.qty}|${gone.side}`); overflow += 1; } return true; },
     advance(now) { const cut = now - retentionMs; while (trades.length && trades[0].eventTs < cut) { const gone = trades.shift(); ids.delete(gone.nativeTradeId ?? `${gone.eventTs}|${gone.price}|${gone.qty}|${gone.side}`); } },
-    fi(startTs, endTs, query = {}) { return flowImbalance(trades, startTs, endTs, { ...query, asOfTs: query.asOfTs ?? endTs, feedEpoch: query.feedEpoch ?? epoch }); }, notional(startTs, endTs, query = {}) { return windowNotional(trades, startTs, endTs, { asOfTs: query.asOfTs ?? endTs, feedEpoch: query.feedEpoch ?? epoch }); }, vwap(startTs, endTs, query = {}) { return vwap(trades, startTs, endTs, { asOfTs: query.asOfTs ?? endTs, feedEpoch: query.feedEpoch ?? epoch }); }, rv60(decisionTs, coverage) { return relativeVolume60(trades, decisionTs, { ...coverage, epoch: coverage?.epoch ?? epoch }); },
+    fi(startTs, endTs, query = {}) { return flowImbalance(trades, startTs, endTs, { ...query, asOfTs: query.asOfTs ?? endTs, feedEpoch: query.feedEpoch ?? epoch, sortedByReceipt }); }, notional(startTs, endTs, query = {}) { return windowNotional(trades, startTs, endTs, { asOfTs: query.asOfTs ?? endTs, feedEpoch: query.feedEpoch ?? epoch, sortedByReceipt }); }, vwap(startTs, endTs, query = {}) { return vwap(trades, startTs, endTs, { asOfTs: query.asOfTs ?? endTs, feedEpoch: query.feedEpoch ?? epoch, sortedByReceipt }); }, rv60(decisionTs, coverage) { return relativeVolume60(trades, decisionTs, { ...coverage, epoch: coverage?.epoch ?? epoch, sortedByReceipt }); },
     // the trades inside [startTs, endTs) in receipt order: the challengers' window input (focused completion §5), never a copy of the whole tape
-    window(startTs, endTs, query = {}) { return tradesAsOf(trades, startTs, endTs, { asOfTs: query.asOfTs ?? endTs, feedEpoch: query.feedEpoch ?? epoch }).trades; },
-    snapshot: () => trades.slice(), status: () => ({ trades: trades.length, duplicatesDropped: dropped, overflow, epoch, epochChanges, lastTs }),
+    window(startTs, endTs, query = {}) { return tradesAsOf(trades, startTs, endTs, { asOfTs: query.asOfTs ?? endTs, feedEpoch: query.feedEpoch ?? epoch, sortedByReceipt }).trades; },
+    snapshot: () => trades.slice(), status: () => ({ trades: trades.length, duplicatesDropped: dropped, overflow, epoch, epochChanges, lastTs, sortedByReceipt, disorder }),
   };
 }
 // ---- bounded feature cache keyed by input identity (digest + coverage + recipe version + reference endpoints) --------------------

@@ -60,11 +60,51 @@ Digest law: `sha256` over the sorted repository-relative file list, each entry a
 
 ```
 FROZEN_FOR_PAPER
-judge/*.js       9122a83068c6f4b99d812a4c90647f6914285e2b9148a1e4f42dc68ccbbcb9ba
+judge/*.js       b8d814731a3a460d24b62a4a23c1a46966b91bc1939d4a243f8250b7270150c8
 execution/*.js   bfcff6846d4dfd157eb84c2a5504298ba55244c09afeb746f33a1f5d1095a9a4
 watch/watch.js   6f319a1ee72a2b43346b8d07f906bb3ca31566ca7e3be0180d57f551d8a1afe1
-all (49 files)   39a03bf6645eea9b01cb0bd5a83baf31e941ef075431f1c19f51960f59363d66
+all (49 files)   ad323dca8b886117a5aefa00e0f830518fdd4fd7624d7f22e59ecb4535c36340
 ```
+
+### 4.42 Audited change — 2026-09-21 PUBLISH-FIX-111: the flow windows were the main thread — every scan bounded by the receipt clock, exactly (previous judge digest `9122a83068c6…`; now `b8d814731a3a…`; all `39a03bf6645e…` → `ad323dca8b88…`; execution and watch/watch.js UNCHANGED; 49 files)
+
+`judge/features.js` only. Production `2b2047d0` at 04:19, the sampled minute at 100% busy with twenty candidates on the
+stage: `CPU PROFILE 60s: busy 60026ms idle 178ms · top: cmp 13% · parseDecimal 8% · (garbage collector) 7% ·
+fromNumberLexeme 6% · canonicalJson 6% · windowFacts 5% · parseDecimalUncached 4% · onBook 3%` — and in the same
+minutes `hypothesis lock not durable within 10 s` six times on NEAR and SUI (the two most active crossers) and a resource
+shed at `lag=3101ms`. Every window query (`tradesAsOf`, and `queryEpoch` before it) scanned the WHOLE retained trade
+array — 25 minutes of prints — to find a 15-second window, with decimal-string arithmetic per print; `windowFacts` asks
+for four imbalance windows, a vwap and RV60's 21-minute window up to four times a second per candidate. The cost rose
+with the trade rate, so the Judge was slowest on exactly the coins that were running.
+
+The change is a lower bound and it is EXACT. `validTradeClock`, enforced by `add()` at insertion, guarantees
+`eventTs <= receiptTs`; a print inside `[startTs, endTs)` by `eventTs` therefore has `receiptTs >= startTs`; the tracker's
+array is in receipt order (appended as received, trimmed from the front, cleared on an epoch change). A binary search on
+`receiptTs` skips only prints that could never be in the window. The tracker passes `sortedByReceipt` with every query and
+turns it off for good the moment a print arrives with an earlier receipt clock than its predecessor (`disorder` counted in
+its status); a plain array without the hint is scanned from index 0 exactly as before, so every other caller is byte-for-byte
+unchanged. `flowImbalance`'s widened windows (PUBLISH-FIX-83 item 8) recompute the bound per widening, so the widest start
+is honoured. No feature value, window law, epoch law, coverage law or decimal rounding moved.
+
+Fenced by `test/publish-fix-111-bounded-windows.test.js` (5): bounded == full over every window function and all
+twenty-one RV60 windows on six thousand pseudo-random prints; the tracker's readings equal hint-less readings over its own
+prints including a widened window; disorder turns the hint off and readings stay correct; an epoch change restores it; and
+a 15-second window over 40,000 prints is at least 4x faster. `test/judge-differential.test.js` (recorded inputs replayed
+on both trees) is green. Authority unchanged: PAPER_SIMULATION_ONLY.
+
+### 4.41 Recorded change — 2026-09-21 PUBLISH-FIX-110: the tape's resource guard shed the prey; runners are shed last now (frozen core UNCHANGED; `tape/run.js` re-pinned in `test/social-4f-scope.test.js`)
+
+Not a frozen change. `tape/resource-law.js` (version 1 → 2) and `tape/run.js`. The owner asked why the snake did not
+bite ZETA. Deployment `2b2047d0`: the fitness funnel (PUBLISH-FIX-98) put ZETA on the stage FIRST — `57.245% 1h (fit
+10.408x)` — and six minutes later `RESOURCE_WARNING heap=737MB lag=3101ms (LAG_SUSTAINED) — shedding 7 lowest-volume
+pairs: ZETA RARI UAI NIL CFG CELR PTB`. The guard shed the LOWEST 24-hour volume first and re-admitted the highest volume
+first; the coins this application hunts are small, so under any pressure it dumped seven runners in one stroke, kept the
+thirty majors that never move, and would have brought the runners back last. Now the shed order is fitness (the fit the hot
+lane recorded on adoption), least fit first; a pair with no fit at all — the static base universe — goes before any pair
+that has one; ties fall back to volume; re-admission is fittest first. WHEN to shed (heap ceiling, lag threshold, the
+two-check sustain, the five-minute calm) is untouched; only WHOM. Held or pending exposure is still never shed. Authority
+NONE. Fenced by `test/publish-fix-110-runners-shed-last.test.js` (5), including the exact seven-runner shape from
+`2b2047d0` and that with no fitness anywhere the old law stands byte for byte.
 
 ### 4.40 Audited change — 2026-09-21 PUBLISH-FIX-104: a THIRD six was clamping the policy (previous judge digest `6e7022571afd…`; now `9122a83068c6…`; all `d393d661b0b6…` → `39a03bf6645e…`; execution and watch/watch.js UNCHANGED; 49 files)
 
