@@ -1,0 +1,241 @@
+From 3e0961e2ec9e88ae9e6981b3bfab73f6d4e6f43e Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 21 Sep 2026 02:55:00 +0000
+Subject: [PATCH] PUBLISH-FIX-101: the second look has never armed - one
+ missing gate name
+
+Every JUDGE FUNNEL line ever printed, on every deployment:
+  SECOND LOOK: flow-only refusals 0 -> looks retaken 0 (armed 0, dropped 0)
+The counter increments on the first line of the arming path, so the path
+was never reached. Not tuning - a bug.
+
+Deployment 77962d92, first three decisions, all NO_TRADE:
+  top refusals: PRIOR_MID_RESPONSE_SMALL 3, RECLAIM_FI15 3, FI15 3,
+                FI60_POSITIVE 3, FI15_FRESH_AT_D 3, PRIOR_FI_ABSORBED 2
+Five of six were in SECOND_LOOK_FLOW_GATES. FI15_FRESH_AT_D was not, and
+the test is refused.every(id => set.has(id)) - so one name threw the
+chain away. Over 8,076 recorded refused looks FI15_FRESH_AT_D was the
+companion of a flow refusal 2,307 times, DEPTH_HOLDS_80PCT_OF_BASELINE
+1,173 times: the two largest reasons the feature was inert.
+
+Both are facts about the decision INSTANT, not about the coin:
+FI15_FRESH_AT_D is the same 15s buying-pressure measure as FI15 read at
+D (already trusted as retryable in DATA_LOOK_GATES), and
+DEPTH_HOLDS_80PCT_OF_BASELINE is the current 10bps bid notional vs the
+frozen median. Three minutes later both are different numbers - the
+whole premise of a second look.
+
+Also: a chain ended by a structural refusal now NAMES the gate that
+ended it (counters.secondLookEndedBy, bounded 32, counted only when a
+flow gate was among the refusers), and fly.js prints it - plus
+dataLooksScheduled, which was being counted and never reported. Silence
+is what let a dead feature hide for four days.
+
+Nothing structural entered the set; no threshold moved; the bound and
+the same-level requirement stand; a retaken look is a fresh crossing
+with a fresh durable lock and every gate at full strength.
+
+Frozen change: judge digest 96f83523029c -> 5233617b47ae, all
+6016f931e155 -> e35b54c87b63; execution and watch/watch.js unchanged.
+Recorded as docs/JUDGE-PAPER-AUDIT.md 4.38. Fenced by
+test/publish-fix-101-second-look-actually-arms.test.js (5).
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01RoFoPS22WFW1oUnbWzPayd
+---
+ docs/JUDGE-PAPER-AUDIT.md                     | 33 ++++++++-
+ fly.js                                        |  2 +-
+ judge/judge.js                                | 25 ++++++-
+ ...-fix-101-second-look-actually-arms.test.js | 69 +++++++++++++++++++
+ 4 files changed, 123 insertions(+), 6 deletions(-)
+ create mode 100644 test/publish-fix-101-second-look-actually-arms.test.js
+
+diff --git a/docs/JUDGE-PAPER-AUDIT.md b/docs/JUDGE-PAPER-AUDIT.md
+index 707e864..44c7ebe 100644
+--- a/docs/JUDGE-PAPER-AUDIT.md
++++ b/docs/JUDGE-PAPER-AUDIT.md
+@@ -60,12 +60,41 @@ Digest law: `sha256` over the sorted repository-relative file list, each entry a
+ 
+ ```
+ FROZEN_FOR_PAPER
+-judge/*.js       96f83523029c1a5a9ffcac64120f667b8f84fbcd9f4eafea050804662f3e58bc
++judge/*.js       5233617b47ae5de6fd91cd180bf3c8f7360645cbbdf406f430298d72220f1abb
+ execution/*.js   bfcff6846d4dfd157eb84c2a5504298ba55244c09afeb746f33a1f5d1095a9a4
+ watch/watch.js   6f319a1ee72a2b43346b8d07f906bb3ca31566ca7e3be0180d57f551d8a1afe1
+-all (49 files)   6016f931e15531e63a2f0d734137f914d9f8c0e2831902e4cc7806333fcd4127
++all (49 files)   e35b54c87b63c8384515ff54be10d775f05ae4a246b2d36bc8fc4bc361410e30
+ ```
+ 
++### 4.38 Audited change — 2026-09-21 PUBLISH-FIX-101: the second look has never armed once; two right-now flow gates were missing from its set (previous judge digest `96f83523029c…`; now `5233617b47ae…`; all `6016f931e155…` → `e35b54c87b63…`; execution and watch/watch.js UNCHANGED; 49 files)
++
++`judge/judge.js` only. The second look of §4.29 (PUBLISH-FIX-79, owner directive 2026-09-19: "fix the thing that will make him
++miss the winners") had fired ZERO times since it shipped. Every JUDGE FUNNEL line on every deployment read
++`SECOND LOOK: flow-only refusals 0 -> looks retaken 0 (armed 0, dropped 0)`, and the counter is incremented on the first line of
++the arming path, so the path was never reached.
++
++Diagnosis from the snake's own records, not from reading the code: deployment 77962d92's first three decisions were all NO_TRADE
++with `top refusals: PRIOR_MID_RESPONSE_SMALL 3, RECLAIM_FI15 3, FI15 3, FI60_POSITIVE 3, FI15_FRESH_AT_D 3, PRIOR_FI_ABSORBED 2`.
++Five of those six were already in `SECOND_LOOK_FLOW_GATES`; `FI15_FRESH_AT_D` was not. The arming test is
++`refused.every((id) => SECOND_LOOK_FLOW_GATES.has(id))`, so one missing name discarded the whole chain. Over 8,076 recorded
++refused looks, `FI15_FRESH_AT_D` accompanied a flow refusal 2,307 times and `DEPTH_HOLDS_80PCT_OF_BASELINE` 1,173 times — the two
++largest reasons the feature was inert. Both are facts about the decision instant, not about the coin: `FI15_FRESH_AT_D` is the
++same 15-second buying-pressure measure as `FI15` read at D (`judge/setups.js` line 137, and it was already trusted as retryable
++in `DATA_LOOK_GATES`), and `DEPTH_HOLDS_80PCT_OF_BASELINE` is the current 10bps bid notional against the frozen median. Three
++minutes later both are different numbers, which is the whole premise of a second look.
++
++Changed: `SECOND_LOOK_FLOW_GATES` gains `FI15_FRESH_AT_D` and `DEPTH_HOLDS_80PCT_OF_BASELINE` (8 ids); `DATA_LOOK_GATES` is now
++the flow set plus `COVERAGE_60S` alone; and a chain ended by a structural refusal NAMES the gate that ended it
++(`counters.secondLookEndedBy`, bounded to 32 names, counted only when a flow gate was among the refusers) so this class of
++silent death cannot hide again — `fly.js` prints it, and the previously unreported `dataLooksScheduled`, on the funnel line.
++
++UNCHANGED: nothing structural entered the set (trend, phase, evidence dimensions, geometry, stop geometry and cost still end the
++chain), no threshold moved, no gate is skipped or weakened, the bound stays at `maxLooks` (hard-capped at 4) with the mid required
++at or above the same frozen level, and a retaken look is an ordinary fresh crossing with a fresh durable hypothesis lock judged by
++every gate at full strength. Authority unchanged: PAPER_SIMULATION_ONLY. Fenced by
++`test/publish-fix-101-second-look-actually-arms.test.js` (5 tests, including the exact live refusal set from 77962d92 and an
++explicit list of the structural gates that must still refuse).
++
+ ### 4.37 Recorded change — 2026-09-21 PUBLISH-FIX-100: the stage widens from six to twenty and binds a NEW $500 account, `paper-starting-styles-usd500-fee080-wide20` (frozen core UNCHANGED; no digest moves)
+ 
+ Not a frozen change: `judge/*.js`, `execution/*.js` and `watch/watch.js` are byte-identical to §4.35. What changed is the
+diff --git a/fly.js b/fly.js
+index 8477f59..d8c0e2b 100644
+--- a/fly.js
++++ b/fly.js
+@@ -559,7 +559,7 @@ if (SERPENT_MODE === 'DATA_ONLY') {
+           // bytes carried: the whole account state travels twice per commit) vs plain queries (the tape) — and the pool gauge
+           let dbClocks = '';
+           try { const c = getPersistence()?.db?.clocks?.() ?? null; if (c) { const kb = (x) => (x && Number.isFinite(x.p50) ? `p50 ${Math.round(x.p50 / 1024)} / max ${Math.round(x.max / 1024)} KB` : 'no samples'); dbClocks = `; DB: tx ${ms(c.tx)} (statements/tx p50 ${c.txStatements?.p50 ?? '?'}, bytes/tx ${kb(c.txParamBytes)}); pool checkout wait ${ms(c.checkoutWait)} (failures ${c.checkoutFailures}, retried ${c.checkoutRetries ?? 0}); query ${ms(c.query)}; pool ${c.pool?.total ?? '?'} open / ${c.pool?.idle ?? '?'} idle / ${c.pool?.waiting ?? '?'} waiting of ${c.pool?.max} (${c.pool?.lockSessions} held for life by locks)${c.slowestTx ? `; slowest tx ${c.slowestTx.ms} ms, ${c.slowestTx.statements} statements, ${Math.round(c.slowestTx.paramBytes / 1024)} KB, began '${c.slowestTx.first}'` : ''}`; } } catch (err) { dbClocks = `; DB clocks unavailable (${String(err?.message ?? err).slice(0, 80)})`; }
+-          console.log(`JUDGE FUNNEL: ${st.candidates} candidates; books ${k.books ?? 0}${d('books')}, trades ${k.trades ?? 0}${d('trades')}; crossings ${k.crossings ?? 0}${d('crossings')} -> confirmations ${k.confirmations ?? 0}${d('confirmations')} -> expired ${k.expired ?? 0}${d('expired')} (queue-delay expired ${k.queueDelayExpired ?? 0}); decisions ${k.decisions ?? 0}${d('decisions')}, entries ${k.entries ?? 0}${d('entries')}, close calls (every gate passed, no size) ${k.closeCalls ?? 0}${d('closeCalls')}, needs-data ${k.needsData ?? 0}, stale re-offered ${k.staleReoffered ?? 0}, lock waits ${k.lockWaits ?? 0} / re-offered ${k.lockReoffered ?? 0} / appends ${k.lockBatches ?? 0} / coalesced ${k.lockCoalesced ?? 0}; move-too-old ${k.moveTooOld ?? 0}; SECOND LOOK: flow-only refusals ${k.flowOnlyRefusals ?? 0} -> looks retaken ${k.secondLookCrossings ?? 0} (armed ${k.secondLooksArmed ?? 0}, dropped ${k.secondLooksDropped ?? 0}); last-256 by status ${JSON.stringify(byStatus)}; top refusals: ${refusals}; top crossers: ${crossers}${clocks}${dbClocks}; ${loopLag.line()}; ${relookSource ? relookSource.line() : 'LEARNED RE-LOOK: not started'}; ${volatilityWatch ? volatilityWatch.line() : 'VOLATILITY WATCH: not started'}; ${moveClockLesson ? moveClockLesson.line() : 'MOVE CLOCK: not started'}; ${scoutSource ? scoutSource.line() : 'SOCRATES SCOUT: not started'}${neverWatch.size ? `; NEVER-WATCH: ${[...neverWatch].join(',')} (${neverWatchDropped} nominations dropped at the last pass)` : ''}`);
++          console.log(`JUDGE FUNNEL: ${st.candidates} candidates; books ${k.books ?? 0}${d('books')}, trades ${k.trades ?? 0}${d('trades')}; crossings ${k.crossings ?? 0}${d('crossings')} -> confirmations ${k.confirmations ?? 0}${d('confirmations')} -> expired ${k.expired ?? 0}${d('expired')} (queue-delay expired ${k.queueDelayExpired ?? 0}); decisions ${k.decisions ?? 0}${d('decisions')}, entries ${k.entries ?? 0}${d('entries')}, close calls (every gate passed, no size) ${k.closeCalls ?? 0}${d('closeCalls')}, needs-data ${k.needsData ?? 0}, stale re-offered ${k.staleReoffered ?? 0}, lock waits ${k.lockWaits ?? 0} / re-offered ${k.lockReoffered ?? 0} / appends ${k.lockBatches ?? 0} / coalesced ${k.lockCoalesced ?? 0}; move-too-old ${k.moveTooOld ?? 0}; SECOND LOOK: flow-only refusals ${k.flowOnlyRefusals ?? 0} -> looks retaken ${k.secondLookCrossings ?? 0} (armed ${k.secondLooksArmed ?? 0}, dropped ${k.secondLooksDropped ?? 0}, data looks ${k.dataLooksScheduled ?? 0}); chains ended by: ${Object.entries(k.secondLookEndedBy ?? {}).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([g, n]) => `${g} ${n}`).join(', ') || 'nothing'}; last-256 by status ${JSON.stringify(byStatus)}; top refusals: ${refusals}; top crossers: ${crossers}${clocks}${dbClocks}; ${loopLag.line()}; ${relookSource ? relookSource.line() : 'LEARNED RE-LOOK: not started'}; ${volatilityWatch ? volatilityWatch.line() : 'VOLATILITY WATCH: not started'}; ${moveClockLesson ? moveClockLesson.line() : 'MOVE CLOCK: not started'}; ${scoutSource ? scoutSource.line() : 'SOCRATES SCOUT: not started'}${neverWatch.size ? `; NEVER-WATCH: ${[...neverWatch].join(',')} (${neverWatchDropped} nominations dropped at the last pass)` : ''}`);
+         } catch (err) { console.error(`JUDGE FUNNEL line: ${err.message}`); }
+       };
+       const runOnce = () => recorder.tick().then((summary) => { runResearch(); logLedger(summary); logFunnel(); }).catch((err) => console.error(`LEARNING DATA CLOCK tick: ${err.message}`));
+diff --git a/judge/judge.js b/judge/judge.js
+index 1d28c90..68195df 100644
+--- a/judge/judge.js
++++ b/judge/judge.js
+@@ -105,7 +105,18 @@ export function createJudge({ accountId, policy, policyDigest, dispatcher, feed,
+   // frozen references, new durable lock, new confirmation, EVERY gate again at full strength. Bounded to `maxLooks` per chain
+   // (a natural crossing starts a new chain); a mid below the level drops the look (the thesis is gone; a natural re-cross will
+   // come). No threshold moves. Port absent: nothing here runs and the record is the baseline byte for byte.
+-  const SECOND_LOOK_FLOW_GATES = new Set(['FI15', 'FI60_POSITIVE', 'RV60', 'PRIOR_FI_ABSORBED', 'PRIOR_MID_RESPONSE_SMALL', 'RECLAIM_FI15']);
++  // PUBLISH-FIX-101 (2026-09-21): the second look had NEVER armed once in the app's life — `flow-only refusals 0` on every funnel line
++  // ever printed. It was not tuning: the arming test requires EVERY refused gate to be in this set, and two gates that are pure
++  // right-now flow were missing from it, so they ended the chain on almost every look that the feature exists for.
++  //   FI15_FRESH_AT_D — the SAME 15-second buying-pressure measure as FI15, read at the decision instant (judge/setups.js line 137);
++  //     it was already trusted as retryable in DATA_LOOK_GATES below. Live companion count over four days: 2,307 — the single most
++  //     common reason a flow refusal was thrown away.
++  //   DEPTH_HOLDS_80PCT_OF_BASELINE — the CURRENT 10bps bid notional against the frozen median; a book fact about this second,
++  //     not about the coin. Companion count: 1,173.
++  // Everything structural still ends the chain exactly as before: trend (EMA5_ABOVE_EMA20), phase (CONTINUATION_PHASE_ELIGIBLE,
++  // NOT_EXHAUSTED), evidence (DISTINCT_EVIDENCE_DIMENSIONS), geometry (PULLBACK_WITHIN_1_5_ATR, COMPRESSION_5BAR, STOP_GEOMETRY).
++  // No threshold moves, no gate is skipped: a second look is a fresh crossing judged by every gate at full strength.
++  const SECOND_LOOK_FLOW_GATES = new Set(['FI15', 'FI60_POSITIVE', 'RV60', 'PRIOR_FI_ABSORBED', 'PRIOR_MID_RESPONSE_SMALL', 'RECLAIM_FI15', 'FI15_FRESH_AT_D', 'DEPTH_HOLDS_80PCT_OF_BASELINE']);
+   // PUBLISH-FIX-82 GATE LEARNING (owner directive 2026-09-19): a port whose lesson() answers the learned lines { FI15: 0.15, ... }
+   // for judge/setups.js LEARNABLE_GATES; each decision reads the lesson ONCE (so one look is judged on one set of lines), only
+   // finite numbers inside a gate's band count, a faulting port reads as absent, and the decision carries a GATE_LEARNING row
+@@ -127,7 +138,15 @@ export function createJudge({ accountId, policy, policyDigest, dispatcher, feed,
+   const secondLookCfg = secondLook && typeof secondLook === 'object' ? { afterMs: Number.isFinite(secondLook.afterMs) && secondLook.afterMs >= 15_000 ? secondLook.afterMs : 180_000, maxLooks: Number.isInteger(secondLook.maxLooks) && secondLook.maxLooks >= 1 ? Math.min(secondLook.maxLooks, 4) : 2, staleMs: 120_000 } : null;
+   function scheduleSecondLook(c, setupId, frozen, refused, D) {
+     if (!secondLookCfg) return;
+-    if (!frozen || !Array.isArray(refused) || !refused.length || !refused.every((id) => SECOND_LOOK_FLOW_GATES.has(id))) { if (c.secondLook.delete(setupId)) counters.secondLooksEnded = (counters.secondLooksEnded ?? 0) + 1; return; } // a structural refusal ends the chain (PUBLISH-FIX-83 item 37: counted)
++    if (!frozen || !Array.isArray(refused) || !refused.length || !refused.every((id) => SECOND_LOOK_FLOW_GATES.has(id))) {
++      // PUBLISH-FIX-101: a chain that ends SAYS WHICH GATE ENDED IT. Silence here is what hid a dead feature for four days: the
++      // counter read 0 and nothing named the gate doing the killing. Bounded to 32 names; flow-only refusals are never counted here.
++      if (Array.isArray(refused) && refused.length && refused.some((id) => SECOND_LOOK_FLOW_GATES.has(id))) {
++        counters.secondLookEndedBy = counters.secondLookEndedBy ?? {};
++        for (const id of refused) if (!SECOND_LOOK_FLOW_GATES.has(id) && (counters.secondLookEndedBy[id] !== undefined || Object.keys(counters.secondLookEndedBy).length < 32)) counters.secondLookEndedBy[id] = (counters.secondLookEndedBy[id] ?? 0) + 1;
++      }
++      if (c.secondLook.delete(setupId)) counters.secondLooksEnded = (counters.secondLooksEnded ?? 0) + 1; return;
++    } // a structural refusal ends the chain (PUBLISH-FIX-83 item 37: counted)
+     counters.flowOnlyRefusals += 1;
+     const prev = c.secondLook.get(setupId); const looks = prev ? prev.looks : 0;
+     if (looks >= secondLookCfg.maxLooks) { counters.secondLooksDropped += 1; c.secondLook.delete(setupId); return; }
+@@ -138,7 +157,7 @@ export function createJudge({ accountId, policy, policyDigest, dispatcher, feed,
+   // crossing with no second look at all, so a mover was judged blind exactly once in its first 21 minutes and never again until the
+   // mid fell below the level and re-crossed. Now a data-only refusal schedules a second look when the data can be there: at the
+   // coverage clock's 21-minute mark for an RV60 coverage wait, else after the ordinary second-look delay; never more than 25 minutes out.
+-  const DATA_LOOK_GATES = new Set([...SECOND_LOOK_FLOW_GATES, 'COVERAGE_60S', 'FI15_FRESH_AT_D']);
++  const DATA_LOOK_GATES = new Set([...SECOND_LOOK_FLOW_GATES, 'COVERAGE_60S']); // PUBLISH-FIX-101: FI15_FRESH_AT_D moved up into the flow set itself
+   function scheduleDataLook(c, setupId, frozen, refused, D, fast) {
+     if (!secondLookCfg || !frozen || !Array.isArray(refused) || !refused.length || !refused.every((id) => DATA_LOOK_GATES.has(id))) return;
+     const prev = c.secondLook.get(setupId); const looks = prev ? prev.looks : 0; if (looks >= secondLookCfg.maxLooks) return;
+diff --git a/test/publish-fix-101-second-look-actually-arms.test.js b/test/publish-fix-101-second-look-actually-arms.test.js
+new file mode 100644
+index 0000000..6786a5f
+--- /dev/null
++++ b/test/publish-fix-101-second-look-actually-arms.test.js
+@@ -0,0 +1,69 @@
++// PUBLISH-FIX-101 (2026-09-21). The second look (PUBLISH-FIX-79, the owner's directive "fix the thing that will make him miss the
++// winners") has NEVER ARMED ONCE. Every JUDGE FUNNEL line ever printed, on every deployment, read:
++//
++//     SECOND LOOK: flow-only refusals 0 -> looks retaken 0 (armed 0, dropped 0)
++//
++// That is not a quiet market. Deployment 77962d92, its first three decisions, all NO_TRADE:
++//     top refusals: PRIOR_MID_RESPONSE_SMALL 3, RECLAIM_FI15 3, FI15 3, FI60_POSITIVE 3, FI15_FRESH_AT_D 3, PRIOR_FI_ABSORBED 2
++// Five of those six are buying-pressure gates in the second look's own set. The sixth, FI15_FRESH_AT_D, was NOT — and the arming
++// test is `refused.every(id => SECOND_LOOK_FLOW_GATES.has(id))`, so ONE missing name threw the whole chain away, silently, on
++// every look the feature was built for. Across the recorded episodes FI15_FRESH_AT_D was the companion of a flow refusal 2,307
++// times and DEPTH_HOLDS_80PCT_OF_BASELINE 1,173 times — the two most common reasons the feature never fired.
++//
++// Both are facts about RIGHT NOW: FI15_FRESH_AT_D is the same 15-second buying-pressure measure as FI15 read at D, and
++// DEPTH_HOLDS_80PCT_OF_BASELINE is the current 10bps bid notional against the frozen median. Three minutes later they are
++// different numbers — which is the entire premise of a second look. Nothing structural moved, and no threshold moves: the retaken
++// look is a fresh crossing with a fresh durable lock and every gate at full strength.
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import { readFileSync } from 'node:fs';
++
++const SRC = readFileSync('judge/judge.js', 'utf8');
++const setOf = (name) => {
++  const m = SRC.match(new RegExp(`const ${name} = new Set\\(\\[([^\\]]*)\\]`));
++  assert.ok(m, `${name} is declared as a literal Set`);
++  return new Set(m[1].split(',').map((s) => s.trim().replace(/^['"]|['"]$/g, '')).filter(Boolean));
++};
++
++test('FIX101-1: the two right-now flow gates are in the second look\'s set — the live refusal shape now arms', () => {
++  const flow = setOf('SECOND_LOOK_FLOW_GATES');
++  for (const id of ['FI15', 'FI60_POSITIVE', 'RV60', 'PRIOR_FI_ABSORBED', 'PRIOR_MID_RESPONSE_SMALL', 'RECLAIM_FI15']) assert.ok(flow.has(id), `${id} was already there`);
++  assert.ok(flow.has('FI15_FRESH_AT_D'), 'the gate that refused all three of 77962d92\'s first decisions');
++  assert.ok(flow.has('DEPTH_HOLDS_80PCT_OF_BASELINE'), 'the current book against the frozen baseline');
++  // the exact live set from deployment 77962d92 must now pass the arming test
++  const live = ['PRIOR_MID_RESPONSE_SMALL', 'RECLAIM_FI15', 'FI15', 'FI60_POSITIVE', 'FI15_FRESH_AT_D', 'PRIOR_FI_ABSORBED'];
++  assert.ok(live.every((id) => flow.has(id)), `the refusal that has been thrown away all week: ${live.join(',')}`);
++});
++
++test('FIX101-2: nothing STRUCTURAL was let in — a coin that cannot do it still ends the chain', () => {
++  const flow = setOf('SECOND_LOOK_FLOW_GATES');
++  // trend, phase, evidence, geometry and cost are about the coin and the setup, not about this second. Three minutes does not fix them.
++  for (const id of ['EMA5_ABOVE_EMA20', 'PRIOR20_RETURN_POSITIVE', 'PRIOR20_HIGH_BEFORE_LAST3', 'CONTINUATION_PHASE_ELIGIBLE', 'NOT_EXHAUSTED',
++    'DISTINCT_EVIDENCE_DIMENSIONS', 'PULLBACK_WITHIN_1_5_ATR', 'COMPRESSION_5BAR', 'MICRO_RANGE_READY', 'MICRO_PRICE_AT_OR_ABOVE_EMA5',
++    'CHALLENGE_NOT_FAILED', 'SCENARIO_LEVEL_EXISTS', 'LIQUIDITY_PRESENT', 'MID_ABOVE_TRIGGER', 'STOP_GEOMETRY']) {
++    assert.equal(flow.has(id), false, `${id} must still end the chain`);
++  }
++  assert.equal(flow.size, 8, 'exactly the six it had plus the two named in FIX-101');
++});
++
++test('FIX101-3: a data-only refusal still gets its own longer look, and FI15_FRESH_AT_D is not listed twice', () => {
++  const data = setOf('DATA_LOOK_GATES');
++  assert.deepEqual([...data], ['...SECOND_LOOK_FLOW_GATES', 'COVERAGE_60S'], 'DATA_LOOK_GATES now only ADDS the coverage wait on top of the flow set');
++  assert.match(SRC, /DATA_LOOK_GATES = new Set\(\[\.\.\.SECOND_LOOK_FLOW_GATES, 'COVERAGE_60S'\]\)/, 'it is still the flow set plus coverage');
++});
++
++test('FIX101-4: when a chain IS ended by a structural gate, the gate is named — silence is what hid this for four days', () => {
++  assert.match(SRC, /counters\.secondLookEndedBy/, 'the ending gate is counted');
++  // only counted when a FLOW gate was among the refusers: an ordinary structural refusal is not a "second look ended"
++  assert.match(SRC, /refused\.some\(\(id\) => SECOND_LOOK_FLOW_GATES\.has\(id\)\)/);
++  const fly = readFileSync('fly.js', 'utf8');
++  assert.match(fly, /chains ended by:/, 'and the funnel line prints it every time it prints the zero');
++  assert.match(fly, /data looks \$\{k\.dataLooksScheduled \?\? 0\}/, 'the data looks were being scheduled and never reported either');
++});
++
++test('FIX101-5: the law of a second look is unchanged — bounded, same level, every gate at full strength', () => {
++  assert.match(SRC, /afterMs >= 15_000 \? secondLook\.afterMs : 180_000/, 'the delay floor stands');
++  assert.match(SRC, /Math\.min\(secondLook\.maxLooks, 4\)/, 'at most four retakes per chain, ever');
++  assert.match(SRC, /if \(M\.lt\(f\.mid, p\.level\)\) \{ counters\.secondLooksDropped \+= 1/, 'the thesis gone -> the look is dropped, not forced');
++  assert.match(SRC, /funnel\.setupQualified \+= 1; if \(secondLookCfg\) c\.secondLook\.delete\(setupId\)/, 'an eligible look ends the chain');
++});
+-- 
+2.43.0
+
