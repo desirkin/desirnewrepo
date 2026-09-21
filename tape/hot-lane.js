@@ -8,7 +8,7 @@
 // sees the newcomer at once and — stamped at first sight — it preempts the oldest preparation tenant (judge/readiness.js
 // law, unchanged). Held / pending exposure is never evicted; the resource law still applies to hot pairs like any other.
 // Authority NONE: this widens what is WATCHED, never what may be traded.
-export const HOT_LANE_VERSION = 'tape-hot-lane-2';
+export const HOT_LANE_VERSION = 'tape-hot-lane-3';
 // PUBLISH-FIX-96 (2026-09-21, owner directive: "nothing stale should just sit there blocking"). Two rules in this planner held a
 // deep-tape slot against a coin that had earned it and no longer did:
 //   1. A hot pair was evicted ONLY to make room for a new nominee. With nothing new arriving, a coin whose run ended an hour ago
@@ -32,6 +32,12 @@ export function planHotAdoption({ nominations = [], carried = [], verified = [],
   const carriedByCoin = new Map(carried.map((p) => [p.coin, p]));
   const hotNow = carried.filter((p) => p.hot === true).sort((a, b) => (a.hotSinceTs ?? 0) - (b.hotSinceTs ?? 0)); // oldest first
   const nominatedNow = new Set(nominations.filter((n) => n && typeof n.coin === 'string').map((n) => n.coin));
+  // PUBLISH-FIX-98 (2026-09-21, owner: "an ever living funnel ... the one that fits the most is the first one to be there"): each
+  // nomination carries the watch's FITNESS score (the window's range as a multiple of the cost hurdle the Judge's sizing must clear).
+  // A slot is not a place in a queue — it belongs to the fittest coin alive, and a fitter nominee DISPLACES a weaker incumbent rather
+  // than waiting for one to age out. Without a score on either side the old oldest-first order stands, so nothing regresses.
+  const fitOf = new Map(); for (const n of nominations) if (n && typeof n.coin === 'string' && Number.isFinite(n.score)) fitOf.set(n.coin, n.score);
+  const scoreOfPair = (p) => (fitOf.has(p.coin) ? fitOf.get(p.coin) : Number.isFinite(p.hotScore) ? p.hotScore : null);
   // PUBLISH-FIX-96 rule 1: release every hot pair that is no longer nominated, before anyone asks for its slot
   for (const p of hotNow) {
     if (pinned.has(p.symbol)) continue;                         // held / pending exposure never yields
@@ -41,7 +47,8 @@ export function planHotAdoption({ nominations = [], carried = [], verified = [],
     evict.push(p.symbol); nextSeen.delete(p.coin);
     released.push({ coin: p.coin, symbol: p.symbol, reason: 'NO_LONGER_NOMINATED', heldMs });
   }
-  const fresh = nominations.filter((n) => n && typeof n.coin === 'string' && !seen.has(n.coin));
+  const fresh = nominations.filter((n) => n && typeof n.coin === 'string' && !seen.has(n.coin))
+    .sort((a, b) => (Number.isFinite(b.score) ? b.score : -Infinity) - (Number.isFinite(a.score) ? a.score : -Infinity)); // PUBLISH-FIX-98: fittest first, so the best coin takes the first free slot
   // PUBLISH-FIX-83 (full review item 15): `seen` used to be "seen once, refused forever" — a mover nominated while the hot slots were
   // full was never retried, and an evicted coin could never come back. Now a HOT_LANE_FULL skip is NOT remembered (retried on the
   // next pass), and an evicted coin leaves `seen` so a later nomination can re-adopt it. NOT_VERIFIED and ALREADY_CARRIED stay remembered.
@@ -54,13 +61,21 @@ export function planHotAdoption({ nominations = [], carried = [], verified = [],
     if (!v) { skipped.push({ coin: n.coin, reason: 'NOT_VERIFIED_BY_VENUE_SELECTION', retry: true }); continue; }
     const hotCount = hotNow.length + adopt.length - evict.length;
     if (hotCount >= slots) {
-      // PUBLISH-FIX-96 rule 2: the victim is the oldest hot pair past the thrash guard (was: past a two-hour lease)
-      const victim = hotNow.find((p) => !pinned.has(p.symbol) && !evict.includes(p.symbol) && nowTs - (p.hotSinceTs ?? 0) >= minHoldMs);
+      const eligible = hotNow.filter((p) => !pinned.has(p.symbol) && !evict.includes(p.symbol) && nowTs - (p.hotSinceTs ?? 0) >= minHoldMs);
+      // PUBLISH-FIX-98: the WEAKEST eligible incumbent yields, and only to a nominee that actually fits better. A pair whose fit is
+      // unknown is weaker than any scored one (it is no longer on the watch's list at all). With no scores anywhere this is the
+      // PUBLISH-FIX-96 order — oldest first — unchanged.
+      const nomScore = Number.isFinite(n.score) ? n.score : null;
+      const ranked = [...eligible].sort((a, b) => { const sa = scoreOfPair(a); const sb = scoreOfPair(b); if (sa === null && sb === null) return (a.hotSinceTs ?? 0) - (b.hotSinceTs ?? 0); if (sa === null) return -1; if (sb === null) return 1; return sa - sb; });
+      const victim = ranked[0];
       if (!victim) { skipped.push({ coin: n.coin, reason: 'HOT_LANE_FULL', retry: true }); continue; }
+      const victimScore = scoreOfPair(victim);
+      if (nomScore !== null && victimScore !== null && nomScore <= victimScore) { skipped.push({ coin: n.coin, reason: 'FITS_LESS_THAN_EVERY_INCUMBENT', retry: true }); continue; }
       evict.push(victim.symbol); nextSeen.delete(victim.coin);
+      released.push({ coin: victim.coin, symbol: victim.symbol, reason: 'DISPLACED_BY_BETTER_FIT', heldMs: nowTs - (victim.hotSinceTs ?? 0), by: n.coin, fit: nomScore, wasFit: victimScore });
     }
     nextSeen.add(n.coin);
-    adopt.push({ ...v, hot: true, hotSinceTs: nowTs, cause: typeof n.cause === 'string' ? n.cause.slice(0, 80) : 'WIDE_EYE_NOMINATION', nominatedTs: n.ts ?? null });
+    adopt.push({ ...v, hot: true, hotSinceTs: nowTs, hotScore: Number.isFinite(n.score) ? n.score : null, cause: typeof n.cause === 'string' ? n.cause.slice(0, 80) : 'WIDE_EYE_NOMINATION', nominatedTs: n.ts ?? null }); // PUBLISH-FIX-98: the fit it entered with
   }
   return { version: HOT_LANE_VERSION, adopt, evict, released, skipped, seen: nextSeen };
 }

@@ -334,6 +334,22 @@ nothing (heavy selling +0.06% at 15 minutes, strong buying +0.07%). A line someb
   clean stop. The 10-second proposal law is NOT relaxed: the fix is the disk, not the deadline, and no policy byte changed.
   Tests: publish-fix-97-io-lane-on (3; FIX97-1 fails on the previous profile). Green: paper-runtime, write-behind,
   tape-store-write-behind, tape-startup, social-4f-scope.
+- `learning/volatility-watch.js` + `tape/hot-lane.js` (PUBLISH-FIX-98, 2026-09-21; owner: "There should absolutely not be a hot list.
+  It should be an ever living funnel as things boil up to fit what we're trying to do ... the one that fits the most is the first one
+  to be there. Work backwards."): the funnel is ordered by FITNESS, and a slot belongs to the fittest coin alive rather than to
+  whoever got there first. Working backwards from the bite: judge/size-ladder.js sizes nothing unless the scenario target sits about
+  (roundTrip + stop) x REWARD_RISK_MIN above entry — ~5.5% on this account. The wall census (claude/serpent-wall-census-2026-09-21.md)
+  showed that is exactly where every qualified look died: of 11,823 looks in four days, 71 passed every gate, 28 were killed by the
+  CAGE and 38 refused at sizing; the decisive one (ARB, 09-20 16:27) carried rv60 23.587 and fi15 0.995 and was refused because its
+  atrPct was 0.318% — a third of one percent against a 1.6% round trip. Raw range said which coin moved MOST; it never said which
+  could CLEAR THE HURDLE. Now: `fitness` = window range / hurdlePct (5.5), reported on every ranked row and carried on both nomination
+  shapes; the ranked `score` is fitness discounted by the liquidity and print-density weights (unchanged, still discounts not vetoes);
+  fresh nominees are planned fittest-first so the best coin takes the first free slot; when the lane is full the WEAKEST eligible
+  incumbent yields and only to a nominee that actually fits better (`FITS_LESS_THAN_EVERY_INCUMBENT`, retryable — fit changes minute to
+  minute); an adopted pair remembers `hotScore`, and an unscored incumbent (one the watch has dropped) ranks below any scored one. With
+  no scores anywhere the PUBLISH-FIX-96 order stands — oldest first — so nothing regresses. Held/pending exposure is still never
+  evicted; the Judge's law is untouched. Tests: publish-fix-98-fitness-funnel (6; 5 fail on the previous code). Green:
+  learning-volatility-watch, publish-fix-94, publish-fix-96, tape-hot-lane, coin-dossier, social-4f-scope, learning-mover-study.
 - `tools/gate-study-process.js` / `tools/gate-study-child.js`: the join runs in a child process every 30 minutes (90 s
   after boot first); the main thread never reads the ledger; the lesson lands in `data/learning/gate-lessons/lesson.json`
   (+ `state.json` with the proposal history). `fly.js` composes the reader as the Judge's port.

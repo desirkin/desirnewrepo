@@ -45,6 +45,14 @@ export const VOLATILITY_WATCH_DEFAULTS = Object.freeze({
   tradesRef1h: 60,        // PUBLISH-FIX-94: the print-density weight min(1, trades / ref) — a print a minute across the hour weighs 1 (was 120)
   minRange1hPct: 0.8,     // below this the window did not move enough to matter against fees; the list may be shorter than `picks`
   maxStaleMin: 20,        // PUBLISH-FIX-94: a coin must have printed within this many minutes to be ranked NOW (was 5, which read quiet coins as dead feeds)
+  // PUBLISH-FIX-98 (2026-09-21, owner: "an ever living funnel as things boil up to fit what we're trying to do ... the one that fits
+  // the most is the first one to be there"). Working backwards from the bite: the Judge sizes nothing unless the scenario target sits
+  // roughly (roundTrip + stop) x REWARD_RISK_MIN above entry — about 5.5% on this account (1.6% round trip, 0.6% stop, RR 1.5). Raw
+  // range said which coin moved MOST; it never said which coin could CLEAR THE HURDLE. The census of 2026-09-21 showed why that
+  // matters: ARB passed every gate on 23.6x relative volume and 0.99 buying pressure and was refused at sizing because its ATR was
+  // 0.318% — a third of one percent against a 1.6% fee. fitness = the window's range as a MULTIPLE of that hurdle, so a coin is
+  // ranked by whether it can pay, not by whether it wiggled.
+  hurdlePct: 5.5,
   sourceStaleMin: 5,      // PUBLISH-FIX-94: the SOURCE is stale when its newest receipt across every coin is older than this; then nothing is ranked
 });
 const MIN = 60_000;
@@ -96,8 +104,12 @@ export function rankByVolatility({ seriesSource, nowTs, cfg = VOLATILITY_WATCH_D
     const liquidityWeight = Math.min(1, Math.max(0, Math.log10(h.usdVol / (cfg.liquidityRefUsd ?? VOLATILITY_WATCH_DEFAULTS.liquidityRefUsd)) / 2)); const densityWeight = h.trades === null ? 1 : Math.min(1, h.trades / (cfg.tradesRef1h ?? VOLATILITY_WATCH_DEFAULTS.tradesRef1h));
     // PUBLISH-FIX-94: the weights are DISCOUNTS, never a veto — each can at most halve the score. With a plain product a 22% run on $60k in
     // the hour (weight 0.39) scored below a 3% wobble on $3M (weight 1); the dust line above is the veto, the weights only order what is above it.
-    const score = h.rangePct * (0.5 + 0.5 * liquidityWeight) * (0.5 + 0.5 * densityWeight);
-    out.push({ coin, symbol: `${coin}/USD`, range1hPct: round3(h.rangePct), score: round3(score), liquidityWeight: round3(liquidityWeight), densityWeight: round3(densityWeight), trades1h: h.trades, ret1hPct: round3(h.retPct), usdVol1h: Math.round(h.usdVol), range4hPct: l && !l.stale && !l.tooFew ? round3(l.rangePct) : null, lastClose: h.lastClose, lastOpenSec: h.lastOpenSec });
+    // PUBLISH-FIX-98: the ranked quantity is FITNESS — the range as a multiple of the cost hurdle the Judge's sizing must clear — so the
+    // funnel is ordered by what can pay, not by what moved. A coin under 1.0 cannot produce the target however violently it wiggles.
+    const hurdlePct = Number.isFinite(cfg.hurdlePct) && cfg.hurdlePct > 0 ? cfg.hurdlePct : VOLATILITY_WATCH_DEFAULTS.hurdlePct;
+    const fitness = round3(h.rangePct / hurdlePct);
+    const score = (h.rangePct / hurdlePct) * (0.5 + 0.5 * liquidityWeight) * (0.5 + 0.5 * densityWeight);
+    out.push({ coin, symbol: `${coin}/USD`, range1hPct: round3(h.rangePct), fitness, hurdlePct, score: round3(score), liquidityWeight: round3(liquidityWeight), densityWeight: round3(densityWeight), trades1h: h.trades, ret1hPct: round3(h.retPct), usdVol1h: Math.round(h.usdVol), range4hPct: l && !l.stale && !l.tooFew ? round3(l.rangePct) : null, lastClose: h.lastClose, lastOpenSec: h.lastOpenSec });
   }
   out.sort((a, b) => b.score - a.score || b.range1hPct - a.range1hPct || b.usdVol1h - a.usdVol1h || a.coin.localeCompare(b.coin));
   return { ranked: out, skipped: { stale, thin, quiet, streamStale: false, newestReceivedTs: newestReceived } };
@@ -136,7 +148,7 @@ export function createVolatilityWatch({ seriesSource, dataDir, clock = () => Dat
     return current;
   }
   // the Judge's nomination shape (judge/composition.js nominate()): the ENTRY clock ranks, the affirmation keeps the TTL alive
-  const nominations = () => current.picks.map((p) => ({ symbol: p.symbol, assetId: p.coin, source: VOLATILITY_WATCH_SOURCE, nominationKnownAtTs: p.sinceTs, nominationLastSeenTs: p.affirmedTs ?? p.sinceTs }));
+  const nominations = () => current.picks.map((p) => ({ symbol: p.symbol, assetId: p.coin, source: VOLATILITY_WATCH_SOURCE, nominationKnownAtTs: p.sinceTs, nominationLastSeenTs: p.affirmedTs ?? p.sinceTs, score: p.score ?? null, fitness: p.fitness ?? null })); // PUBLISH-FIX-98: the fit travels with the nomination
   const line = () => `VOLATILITY WATCH: ${current.skipped?.streamStale ? 'SOURCE STALE — nothing ranked (newest receipt ' + new Date(current.skipped.newestReceivedTs).toISOString() + ')' : current.picks.length ? current.picks.map((p) => `${p.coin} ${p.range1hPct}%`).join(', ') : 'no coin moved enough this hour'} (ranked ${current.ranked}${current.skipped ? `; quiet-now ${current.skipped.stale}, thin ${current.skipped.thin}, no-range ${current.skipped.quiet}` : ''})`;
   return { version: VOLATILITY_WATCH_VERSION, refresh, nominations, line, current: () => current, status: () => ({ version: VOLATILITY_WATCH_VERSION, picks: current.picks.slice(), ranked: current.ranked, skipped: current.skipped, counters: { ...counters }, config: { ...cfg }, authority: 'NONE' }) };
 }
@@ -146,6 +158,6 @@ export function readVolatilityWatchNow({ dataDir, nowTs = Date.now(), maxAgeMin 
   try {
     const f = volatilityFile(dataDir); if (!existsSync(f)) return [];
     const raw = JSON.parse(readFileSync(f, 'utf8')); if (!raw || raw.version !== VOLATILITY_WATCH_VERSION || !Number.isSafeInteger(raw.ts) || nowTs - raw.ts > maxAgeMin * MIN || !Array.isArray(raw.picks)) return [];
-    return raw.picks.filter((p) => p && typeof p.coin === 'string' && Number.isSafeInteger(p.sinceTs)).map((p) => ({ coin: p.coin, ts: new Date(p.sinceTs).toISOString(), cause: `VOLATILITY_WATCH ${p.range1hPct}% 1h` }));
+    return raw.picks.filter((p) => p && typeof p.coin === 'string' && Number.isSafeInteger(p.sinceTs)).map((p) => ({ coin: p.coin, ts: new Date(p.sinceTs).toISOString(), cause: `VOLATILITY_WATCH ${p.range1hPct}% 1h (fit ${p.fitness ?? '?'}x)`, score: p.score ?? null, fitness: p.fitness ?? null })); // PUBLISH-FIX-98
   } catch { return []; }
 }
