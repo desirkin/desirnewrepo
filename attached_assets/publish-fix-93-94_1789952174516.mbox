@@ -1,0 +1,644 @@
+From 71ac92da21396cf78c15d948cac1b9b5710074b3 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 21 Sep 2026 00:23:07 +0000
+Subject: [PATCH 1/2] =?UTF-8?q?PUBLISH-FIX-93:=20the=20gate=20learner's=20?=
+ =?UTF-8?q?evidence=20rule=20=E2=80=94=20review=20finding=20F1,=20and=20it?=
+ =?UTF-8?q?=20reverses=20FIX-91?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Blind application review, revision 34a25ad2, learning reliability 4.5/10. F1: the training filter
+accepted a look as evidence for one flow gate when every NON-flow gate passed, even if sibling flow
+gates refused it; evaluateUnit then called those looks 'newly admitted' after moving one line. A
+promotion moves ONE line, so those looks would still not trade. Reviewer's reproduction: 1,100 looks
+at FI15 0.15 with RV60 failing published FI15=0.15 and admitted none of them. That filter was
+PUBLISH-FIX-91, added the same afternoon to stop the learner starving.
+
+Corroborated by our own 48-hour gate study (3,174 scored looks): FI15 was never the only refusal on
+any look, so the entire cohort FIX-91 added for FI15 was looks the complete policy still refuses.
+
+- othersOk is strict again (every other required gate actually passed; ok !== true is never
+  counterfactually passable) and is the ONLY thing promotion counts. FIX-91's wider set survives as
+  familyOk, reported in evidence and in the log line, never counted.
+- costHurdlePct fallback 1.0 -> 1.8: it still carried the superseded 0.4%/side schedule after FIX-84
+  moved the paper account to the real Kraken Tier-1 taker of 0.80%. fly.js derives 1.8 from the
+  running policy, so the live learner was correct; any caller that could not read the policy was
+  certifying moves against half the real cost.
+- minClusters 12 -> 30 (review: 'it can certify a lesson using much less effective evidence than the
+  label implies'). A bootstrap over twelve coin-hours reads confident on noise. Can only prevent a
+  move, never cause one.
+- the GATE LEARNING log line now prints scored, usable and the family count it does not count.
+
+Follow-up ticket: gates that fail together need a JOINT family policy proposed and forward-tested
+against the complete rule set. A single-gate threshold change cannot honestly move them.
+
+Tests: publish-fix-93-joint-policy-evidence 5/5 (FIX93-2 is the reviewer's reproduction; FIX93-5
+guards the shipped bars). learning-gate-lesson 10/10 and publish-fix-84 4/4 updated to the corrected
+law. No line can move in production meanwhile: the live learner reads USABLE_57_OF_1000.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01RoFoPS22WFW1oUnbWzPayd
+---
+ learning/gate-lesson.js                       |  38 ++++--
+ test/learning-gate-lesson.test.js             |   6 +-
+ test/publish-fix-84-lesson-kill-age.test.js   |   9 +-
+ ...blish-fix-93-joint-policy-evidence.test.js | 118 ++++++++++++++++++
+ 4 files changed, 154 insertions(+), 17 deletions(-)
+ create mode 100644 test/publish-fix-93-joint-policy-evidence.test.js
+
+diff --git a/learning/gate-lesson.js b/learning/gate-lesson.js
+index a4a3cd8..935d8c0 100644
+--- a/learning/gate-lesson.js
++++ b/learning/gate-lesson.js
+@@ -39,9 +39,16 @@ export const GATE_LESSON_DEFAULTS = Object.freeze({
+   minForward: 100,      // scored looks AFTER a proposal before it is published (and after a publication before it is judged)
+   confidence: 0.9,      // bootstrap probability the cohort a move changes clears the hurdle (LOOSEN) / reads worse than the kept set (TIGHTEN); 0.9 (was 0.8): with the forward test at the same bar a spurious publish needs two 1-in-10 draws
+   tolerancePct: 0.05,   // kept for the ledger line; the test itself is against the cost hurdle (PUBLISH-FIX-83 item 20)
+-  costHurdlePct: 1.0,   // PUBLISH-FIX-83 item 20: the round trip in log-return % (fee 0.4% x 2 + slippage 10 bps x 2); a newly admitted cohort must beat it, an excluded one must fall short of it
++  costHurdlePct: 1.8,   // the round trip in log-return % (taker 0.8% x 2 + slippage 10 bps x 2); a newly admitted cohort must beat it, an excluded one must fall short of it.
++                        // PUBLISH-FIX-93 (2026-09-21): this FALLBACK still read 1.0 — the old 0.4% fee schedule — after FIX-84 moved the paper account to the real Kraken
++                        // Tier-1 taker of 0.80% per side. fly.js derives the hurdle from the running policy's taker rate (1.8 for this account) so the live learner was
++                        // correct, but any caller that could not read the policy certified moves against a hurdle worth barely half the real cost. Review: "learning and
++                        // outcome reports should use the same complete cost model as execution."
+   clusterMs: 3_600_000, // PUBLISH-FIX-83 item 20: looks of one coin inside one hour are one move, one bootstrap cluster
+-  minClusters: 12,      // review finding: a cohort must span at least this many coin-hours before it can move a line
++  minClusters: 30,      // a cohort must span at least this many coin-hours (independent draws) before it can move a line.
++                        // PUBLISH-FIX-93 (2026-09-21), review finding: "it can certify a lesson using much less effective evidence than the label implies". At 12, a
++                        // 100-look cohort behind a "1,000 scored looks" headline could rest on twelve coin-hours, and a bootstrap over twelve clusters is a coarse
++                        // distribution that reads confident on noise. 30 is the conventional floor for resampling stability. This can only PREVENT a move, never cause one.
+   maxLookbackDays: 30,  // looks older than this are not tests
+   bootstraps: 400,
+   yardstick: 'continuation', // 15-minute continuation log return (decision-outcome yardstick); 'bite' = 5-minute
+@@ -95,12 +102,20 @@ export function testsOf(episodes, outcomes, { yardstick = GATE_LESSON_DEFAULTS.y
+     const real = e.gates.filter((g) => g && typeof g.id === 'string' && !NOT_A_GATE.has(g.id));
+     for (const g of real) {
+       if (!GATE_BANDS[g.id]) continue; const value = num(g.observed); const line = num(g.threshold); if (value === null || line === null) continue;
+-      // PUBLISH-FIX-91 (2026-09-20): a look is USABLE for a flow gate when every gate OUTSIDE the flow family passed. Item 20 demanded
+-      // every other gate including the other four flow gates, and the flow gates fail together (4-5 at once on most looks): 9-34
+-      // usable looks a day per gate against the 1,000 needed — the learner the owner built was starved by that one clause. The
+-      // family moves together, so the family is judged together; a structural refusal (range, trend, book, stop) still excludes the look.
+-      const othersOk = real.every((x) => x === g || x.ok === true || GATE_BANDS[x.id] !== undefined);
+-      out.push({ gate: g.id, setup: String(e.setupType ?? ''), ts: e.decisionTs, coin: e.canonicalCoin, value, line, othersOk, r });
++      // PUBLISH-FIX-93 (2026-09-21) — REVIEW FINDING F1 (revision 34a25ad2), and it reverses PUBLISH-FIX-91 for promotion.
++      // FIX-91 counted a look as USABLE for one flow gate when every gate OUTSIDE the flow family passed, on the reasoning that the
++      // family moves together. But a promotion moves ONE line: with the proposed line in force the other flow gates are still at
++      // theirs, so a look they refused would still not trade. The learner was therefore publishing a line on "newly admitted" looks
++      // that the complete policy rejects — an invalid policy-improvement inference (the reviewer's reproduction: 1,100 looks at
++      // FI15 0.15 with RV60 failing, FI15 published at 0.15, zero of the 1,100 admitted by the full rule set). Our own 48-hour
++      // gate study said the same thing from the other side: across 3,174 scored looks FI15 was NEVER the only refusal.
++      //   othersOk (STRICT, and the only thing promotion may count): every other required gate actually passed. An UNKNOWN gate
++      //   (ok !== true) is never counterfactually passable. familyOk keeps FIX-91's wider set as a REPORTED diagnostic only.
++      // A joint family policy — proposing and forward-testing all five lines together against the complete rule set — is the
++      // honest way to move gates that fail together, and is its own ticket; it is not a single-gate threshold change.
++      const othersOk = real.every((x) => x === g || x.ok === true);
++      const familyOk = real.every((x) => x === g || x.ok === true || GATE_BANDS[x.id] !== undefined);
++      out.push({ gate: g.id, setup: String(e.setupType ?? ''), ts: e.decisionTs, coin: e.canonicalCoin, value, line, othersOk, familyOk, r });
+     }
+   }
+   return out;
+@@ -110,9 +125,10 @@ export function testsOf(episodes, outcomes, { yardstick = GATE_LESSON_DEFAULTS.y
+ export function evaluateUnit(tests, band, line, cfg, sinceTs = null, { atLine = null } = {}) {
+   const T = sinceTs === null ? tests : tests.filter((t) => t.ts > sinceTs);
+   const scored = T.length; const usable = T.filter((t) => t.othersOk);
++  const family = T.filter((t) => t.familyOk).length; // PUBLISH-FIX-93: reported so the starvation FIX-91 tried to cure stays visible, never counted
+   const admitted = (c) => usable.filter((t) => passes(band.op, t.value, c));
+   const cur = admitted(line); const curR = cur.map((t) => t.r);
+-  const report = { scored, usable: usable.length, admittedNow: cur.length, meanNow: curR.length ? r4(mean(curR)) : null };
++  const report = { scored, usable: usable.length, family, admittedNow: cur.length, meanNow: curR.length ? r4(mean(curR)) : null };
+   // PUBLISH-FIX-83 item 20: USABLE looks (every other gate passed, so this gate alone decided) count toward the minimum, not raw scored
+   if (usable.length < cfg.minScored) return { move: null, reason: `USABLE_${usable.length}_OF_${cfg.minScored}`, ...report };
+   const candidates = [];
+@@ -160,7 +176,7 @@ export function computeGateLesson({ tests, state = null, nowTs = Date.now(), cfg
+     const reference = gate === 'RV60' ? (T.filter((t) => t.line !== null).sort((a, b) => a.ts - b.ts)[0]?.line ?? null) : band.reference;
+     const inForce = u.published ?? reference; if (inForce === null) continue;
+     let ev = evaluateUnit(T, band, inForce, cfg); let movedThisCycle = false;
+-    const unit = { gate, setup: key.startsWith('RV60@') ? key.slice(5) : null, reference, inForce, state: 'DORMANT', evidence: { scored: ev.scored, usable: ev.usable, admittedNow: ev.admittedNow, meanNow: ev.meanNow, reason: ev.reason, loosen: ev.loosen ?? null, tighten: ev.tighten ?? null } };
++    const unit = { gate, setup: key.startsWith('RV60@') ? key.slice(5) : null, reference, inForce, state: 'DORMANT', evidence: { scored: ev.scored, usable: ev.usable, family: ev.family, admittedNow: ev.admittedNow, meanNow: ev.meanNow, reason: ev.reason, loosen: ev.loosen ?? null, tighten: ev.tighten ?? null } };
+     // 1. a published line is kept under forward test: revert when the looks it admitted since publication turned negative with confidence
+     if (u.published !== null && u.before !== null) {
+       const fwd = evaluateUnit(T, band, u.before, { ...cfg, minScored: cfg.minForward }, u.publishedTs ?? 0, { atLine: u.published }); /* PUBLISH-FIX-83 item 20: the published line's OWN cohort, forward looks judged by minForward */ const f = fwd.loosen ?? fwd.tighten ?? null;
+@@ -207,7 +223,7 @@ export function computeGateLesson({ tests, state = null, nowTs = Date.now(), cfg
+ export function gateLessonLine(lesson) {
+   if (!lesson || !lesson.units) return 'GATE LEARNING: no lesson yet';
+   const keys = Object.keys(lesson.units); if (!keys.length) return `GATE LEARNING: DORMANT — no scored looks joined yet (${lesson.tests ?? 0} tests)`;
+-  const parts = keys.map((k) => { const u = lesson.units[k]; const e = u.evidence; const st = u.state === 'PUBLISHED' ? `PUBLISHED ${u.reference}->${u.inForce}` : u.state === 'PROPOSED' ? `PROPOSED ${u.inForce}->${u.proposal?.line} (${u.proposal?.forwardScored ?? 0}/${lesson.cfg.minForward} forward)` : `line ${u.inForce}`; return `${k} ${st}, ${e.scored} scored${e.scored < lesson.cfg.minScored ? ` of ${lesson.cfg.minScored} needed` : ''}, ${e.admittedNow} admitted (mean ${e.meanNow ?? 'n/a'}%)${e.reason && e.reason !== 'SUPPORTED' && e.scored >= lesson.cfg.minScored ? `, ${e.reason}` : ''}`; });
++  const parts = keys.map((k) => { const u = lesson.units[k]; const e = u.evidence; const st = u.state === 'PUBLISHED' ? `PUBLISHED ${u.reference}->${u.inForce}` : u.state === 'PROPOSED' ? `PROPOSED ${u.inForce}->${u.proposal?.line} (${u.proposal?.forwardScored ?? 0}/${lesson.cfg.minForward} forward)` : `line ${u.inForce}`; return `${k} ${st}, ${e.scored} scored, ${e.usable ?? 0} usable${(e.usable ?? 0) < lesson.cfg.minScored ? ` of ${lesson.cfg.minScored} needed` : ''}${(e.family ?? 0) > (e.usable ?? 0) ? ` (${e.family} refused with a sibling flow gate — reported, never counted)` : ''}, ${e.admittedNow} admitted (mean ${e.meanNow ?? 'n/a'}%)${e.reason && e.reason !== 'SUPPORTED' && e.scored >= lesson.cfg.minScored ? `, ${e.reason}` : ''}`; });
+   const moved = Object.keys(lesson.lines).length;
+   return `GATE LEARNING: ${moved ? `${moved} learned line(s) in force` : 'reference lines in force'} — ${parts.join(' | ')}`;
+ }
+diff --git a/test/learning-gate-lesson.test.js b/test/learning-gate-lesson.test.js
+index 9fa96c6..a277f65 100644
+--- a/test/learning-gate-lesson.test.js
++++ b/test/learning-gate-lesson.test.js
+@@ -8,7 +8,7 @@ import os from 'node:os';
+ import { GATE_BANDS, GATE_LESSON_DEFAULTS, testsOf, evaluateUnit, computeGateLesson, gateLessonLine, runGateStudy, createGateLesson, gateLessonPaths, GATE_LESSON_VERSION } from '../learning/gate-lesson.js';
+ import { LEARNABLE_GATES } from '../judge/setups.js';
+ 
+-const CFG = { ...GATE_LESSON_DEFAULTS, minScored: 200, minCohort: 20, minForward: 20, confidence: 0.8, bootstraps: 200, costHurdlePct: 0.2 }; // PUBLISH-FIX-83 item 20: the synthetic returns are in 15-minute log %, the hurdle here is 0.2 (production: 1.0, the round trip)
++const CFG = { ...GATE_LESSON_DEFAULTS, minScored: 200, minCohort: 20, minForward: 20, confidence: 0.8, bootstraps: 200, costHurdlePct: 0.2, minClusters: 12 }; // PUBLISH-FIX-93: these tests exercise the propose/forward-test/publish/revert LOGIC on twelve synthetic coins, so they name their own cluster floor; the production floor (30) is asserted in publish-fix-93 // PUBLISH-FIX-83 item 20: the synthetic returns are in 15-minute log %, the hurdle here is 0.2 (production: 1.0, the round trip)
+ const T0 = Date.parse('2026-09-10T00:00:00Z');
+ // a synthetic scored look: FI15 observed `value` judged against `line`, every other gate ok, 15-minute return `r`
+ const look = (i, { value, line = 0.2, r, othersOk = true, ts = T0 + i * 60_000, gate = 'FI15', setup = 'RANGE_IGNITION', coin = `C${i % 12}` }) => ({ gate, setup, ts, coin, value, line, othersOk, r }); // twelve coins: every hour of looks is twelve bootstrap clusters
+@@ -35,8 +35,8 @@ test('GL-01. testsOf joins looks with their scored 15-minute outcome by (coin, d
+   assert.equal(tests.length, 5, JSON.stringify(tests));
+   assert.ok(tests.some((t) => t.value === 0.7 && t.r === 0.9), 'a 1.5 s clock gap still joins'); assert.equal(tests.filter((t) => t.value === 0.7).length, 1, 'a 5 s gap does not');
+   const ake = tests.filter((t) => t.gate === 'FI15' && t.value === 0.196); assert.equal(ake.length, 1); assert.equal(ake[0].othersOk, true, 'MOVE_CLOCK ok:false is not a gate'); assert.equal(ake[0].r, 1.2); assert.equal(ake[0].line, 0.2);
+-  const akeRv = tests.find((t) => t.gate === 'RV60' && t.value === 2.5); assert.equal(akeRv.othersOk, true, 'PUBLISH-FIX-91: FI15 failing beside it is the flow family, not a structural refusal');
+-  const zamaFi = tests.find((t) => t.gate === 'FI15' && t.value === 0.6); assert.equal(zamaFi.othersOk, true, 'PUBLISH-FIX-91: RV60 failing beside it is the flow family');
++  const akeRv = tests.find((t) => t.gate === 'RV60' && t.value === 2.5); assert.equal(akeRv.othersOk, false, 'PUBLISH-FIX-93 (review F1): FI15 failing beside it means RV60 did not decide this look alone — not evidence for moving RV60'); assert.equal(akeRv.familyOk, true, 'the flow-family view is still reported');
++  const zamaFi = tests.find((t) => t.gate === 'FI15' && t.value === 0.6); assert.equal(zamaFi.othersOk, false, 'PUBLISH-FIX-93 (review F1): RV60 failing beside it means FI15 did not decide this look alone'); assert.equal(zamaFi.familyOk, true, 'the flow-family view is still reported');
+   assert.ok(!tests.some((t) => t.r === 5), 'the old look is outside the lookback');
+ });
+ 
+diff --git a/test/publish-fix-84-lesson-kill-age.test.js b/test/publish-fix-84-lesson-kill-age.test.js
+index f3dc63b..5a21834 100644
+--- a/test/publish-fix-84-lesson-kill-age.test.js
++++ b/test/publish-fix-84-lesson-kill-age.test.js
+@@ -50,7 +50,7 @@ test('FIX89-L3 (blind review 864b4c3a F3). a future-dated lesson is rejected on
+   assert.deepEqual(l2.lesson('RANGE_IGNITION'), {}, 'aged out on the read itself'); assert.match(l2.line(), /lesson STALE/);
+ });
+ 
+-test('FIX91 (the starved learner). a look counts toward a flow gate\'s study when every gate OUTSIDE the flow family passed — the other flow gates may fail too; a structural refusal still excludes it', () => {
++test('FIX91 -> FIX93 (review F1). the flow-family view is REPORTED (familyOk) but only a look this gate alone decided is EVIDENCE (othersOk): a sibling flow gate failing excludes it from the count, exactly as a structural refusal does', () => {
+   const T0 = 1_000_000_000_000;
+   const ep = (i, gates) => ({ datasetId: 'live-judge-x', canonicalCoin: 'AAA', decisionTs: T0 + i * 60_000, setupType: 'RANGE_IGNITION', gates });
+   const g = (id, ok, observed, threshold) => ({ id, ok, observed, threshold });
+@@ -61,6 +61,9 @@ test('FIX91 (the starved learner). a look counts toward a flow gate\'s study whe
+   ];
+   const outcomes = episodes.map((e) => ({ assetId: 'AAA', decisionKnownAtTs: e.decisionTs, yardstick: { continuation: { state: 'KNOWN', logReturnPct: 1 }, bite: { state: 'KNOWN', logReturnPct: 0.5 } } }));
+   const tests = testsOf(episodes, outcomes, { nowTs: T0 + 3_600_000 });
+-  const fi15 = tests.filter((t) => t.gate === 'FI15').map((t) => [t.ts, t.othersOk]);
+-  assert.deepEqual(fi15, [[T0 + 60_000, true], [T0 + 120_000, false], [T0 + 180_000, true]], JSON.stringify(tests));
++  const fi15 = tests.filter((t) => t.gate === 'FI15').map((t) => [t.ts, t.othersOk, t.familyOk]);
++  // PUBLISH-FIX-93: FIX-91 counted look 1 as evidence for FI15 even though RV60 and FI60_POSITIVE refused it too. A promotion moves ONE
++  // line, so that look would still not trade — it is reported in the family view and never counted. Look 2 is a structural refusal
++  // (excluded from both). Look 3 passed everything, so FI15 alone decided it.
++  assert.deepEqual(fi15, [[T0 + 60_000, false, true], [T0 + 120_000, false, false], [T0 + 180_000, true, true]], JSON.stringify(tests));
+ });
+diff --git a/test/publish-fix-93-joint-policy-evidence.test.js b/test/publish-fix-93-joint-policy-evidence.test.js
+new file mode 100644
+index 0000000..6af6072
+--- /dev/null
++++ b/test/publish-fix-93-joint-policy-evidence.test.js
+@@ -0,0 +1,118 @@
++// PUBLISH-FIX-93 (2026-09-21) — REVIEW FINDING F1, blind application review of revision 34a25ad2.
++//
++// The finding, in the reviewer's words: "the training filter accepts a record for one flow gate when every non-flow gate passes,
++// even if other flow gates fail ... After that change, zero of all 1,100 examples passes the complete required gate set because
++// RV60 is still unknown and failing. The output nevertheless calls them newly admitted." That filter was PUBLISH-FIX-91, made the
++// same afternoon to stop the learner starving. It is an invalid policy-improvement inference: a promotion moves ONE line, so a
++// look the other flow gates refused does not become tradable when this one moves.
++//
++// Corroboration from our own data (48-hour gate study, 2026-09-20, 3,174 scored looks): FI15 was never the only refusal on any
++// look — when it failed, a sibling flow gate failed with it. So under FIX-91 the ENTIRE cohort it added for FI15 consisted of
++// looks that would still be refused.
++//
++// The repair keeps promotion strict (every other required gate actually passed; an UNKNOWN gate is never counterfactually
++// passable) and keeps the wider family count as a reported diagnostic. Moving gates that fail together needs a JOINT family
++// policy proposed and forward-tested against the complete rule set — a separate ticket, not a single-gate threshold change.
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import { GATE_BANDS, GATE_LESSON_DEFAULTS, testsOf, evaluateUnit, computeGateLesson } from '../learning/gate-lesson.js';
++
++const T0 = Date.parse('2026-09-10T00:00:00Z');
++const CFG = { ...GATE_LESSON_DEFAULTS, minScored: 200, minCohort: 20, minForward: 20, confidence: 0.8, bootstraps: 200, costHurdlePct: 0.2 };
++
++// the reviewer's shape: FI15 observed 0.15 against a reference line of 0.20 (fails), RV60 unknown/failed on the same look,
++// every structural gate passing. `rv` picks how RV60 is refused: 'FAILED' (ok false) or 'UNKNOWN' (no verdict at all).
++function episodes(n, { start = 0, rv = 'FAILED', r = 3.0 } = {}) {
++  const out = [];
++  for (let i = 0; i < n; i += 1) {
++    const k = start + i;
++    out.push({
++      canonicalCoin: `C${k % 12}`, decisionTs: T0 + k * 60_000, setupType: 'RANGE_IGNITION',
++      gates: [
++        { id: 'FI15', ok: false, observed: 0.15, threshold: 0.2, class: 'SOFT' },
++        rv === 'UNKNOWN'
++          ? { id: 'RV60', observed: null, threshold: 2.0, class: 'SOFT' }
++          : { id: 'RV60', ok: false, observed: 1.1, threshold: 2.0, class: 'SOFT' },
++        { id: 'EMA_STACK', ok: true, observed: 1, threshold: 1, class: 'HARD' },
++        { id: 'RANGE_DEFINED', ok: true, observed: 1, threshold: 1, class: 'HARD' },
++      ],
++    });
++  }
++  return out;
++}
++const outcomes = (eps, r) => eps.map((e) => ({ assetId: e.canonicalCoin, decisionKnownAtTs: e.decisionTs, yardstick: { continuation: { state: 'KNOWN', logReturnPct: r + (((e.decisionTs / 60_000) % 81) / 100 - 0.4) } } }));
++
++test('FIX93-1: a look another flow gate refused is NOT evidence for moving this gate (it is reported as family, never counted as usable)', () => {
++  const eps = episodes(40);
++  const tests = testsOf(eps, outcomes(eps, 3.0), { nowTs: T0 + 100 * 60_000 });
++  const fi = tests.filter((t) => t.gate === 'FI15');
++  assert.equal(fi.length, 40, 'every look joins its scored outcome');
++  assert.ok(fi.every((t) => t.othersOk === false), 'RV60 failed on the same look: FI15 alone did not decide it');
++  assert.ok(fi.every((t) => t.familyOk === true), 'the wider family view is still reported (FIX-91 diagnostic), it is simply not counted');
++  // and the reverse: with RV60 passing, the same look IS this gate's evidence
++  const ok = episodes(1, { start: 500 }).map((e) => ({ ...e, gates: e.gates.map((g) => (g.id === 'RV60' ? { ...g, ok: true, observed: 2.5 } : g)) }));
++  const t2 = testsOf(ok, outcomes(ok, 3.0), { nowTs: T0 + 600 * 60_000 }).filter((t) => t.gate === 'FI15');
++  assert.equal(t2[0].othersOk, true);
++});
++
++test('FIX93-2: the reviewer\'s reproduction — 1,000 looks + 100 later looks at FI15 0.15 with RV60 failing propose and publish NOTHING', () => {
++  const eps = [...episodes(1000), ...episodes(100, { start: 2000 })];
++  const tests = testsOf(eps, outcomes(eps, 3.0), { nowTs: T0 + 3000 * 60_000 });
++  const fi = tests.filter((t) => t.gate === 'FI15');
++  assert.equal(fi.length, 1100);
++  const ev = evaluateUnit(fi, GATE_BANDS.FI15, 0.2, CFG);
++  assert.equal(ev.move, null, 'no line move is supported by looks the complete policy still refuses');
++  assert.equal(ev.usable, 0, 'none of the 1,100 is usable evidence for FI15');
++  assert.equal(ev.family, 1100, 'all 1,100 are visible in the family diagnostic');
++  assert.equal(ev.admittedNow, 0);
++  assert.match(ev.reason, /^USABLE_0_OF_/);
++  // and end to end through the proposal machine: no event, no published line
++  const out = computeGateLesson({ tests: fi, nowTs: T0 + 3000 * 60_000, cfg: CFG });
++  assert.deepEqual(out.lesson.lines, {}, 'the Judge is handed no learned line');
++  assert.equal(out.events.filter((e) => /PROPOSED|PUBLISHED/.test(e)).length, 0, 'nothing proposed, nothing published');
++});
++
++test('FIX93-3: an UNKNOWN required gate is never counterfactually passable', () => {
++  const eps = episodes(300, { rv: 'UNKNOWN' });
++  const fi = testsOf(eps, outcomes(eps, 3.0), { nowTs: T0 + 900 * 60_000 }).filter((t) => t.gate === 'FI15');
++  assert.equal(fi.length, 300);
++  assert.ok(fi.every((t) => t.othersOk === false), 'no verdict is not a pass');
++  assert.equal(evaluateUnit(fi, GATE_BANDS.FI15, 0.2, CFG).move, null);
++});
++
++test('FIX93-4: evidence where this gate alone decided still moves the line — the repair does not disable learning', () => {
++  // 260 looks, RV60 and the structural gates passing, FI15 observed just under the line with a strongly positive scored return:
++  // the cohort the move newly admits is real, tradable and beats the round trip, so the proposal is made on this evidence.
++  const mk = (n, start, value, r) => {
++    const eps = [];
++    for (let i = 0; i < n; i += 1) {
++      const k = start + i;
++      eps.push({
++        canonicalCoin: `C${k % 12}`, decisionTs: T0 + k * 60_000, setupType: 'RANGE_IGNITION',
++        gates: [
++          { id: 'FI15', ok: false, observed: value + ((i * 0.618033) % 1) * 0.04, threshold: 0.2, class: 'SOFT' },
++          { id: 'RV60', ok: true, observed: 2.5, threshold: 2.0, class: 'SOFT' },
++          { id: 'EMA_STACK', ok: true, observed: 1, threshold: 1, class: 'HARD' },
++        ],
++      });
++    }
++    return { eps, outs: eps.map((e, i) => ({ assetId: e.canonicalCoin, decisionKnownAtTs: e.decisionTs, yardstick: { continuation: { state: 'KNOWN', logReturnPct: r + (((i * 7919) % 81) / 100 - 0.4) } } })) };
++  };
++  const { eps, outs } = mk(260, 0, 0.15, 3.0);
++  const fi = testsOf(eps, outs, { nowTs: T0 + 900 * 60_000 }).filter((t) => t.gate === 'FI15');
++  assert.equal(fi.length, 260);
++  assert.ok(fi.every((t) => t.othersOk === true), 'FI15 alone decided every one of these looks');
++  const ev = evaluateUnit(fi, GATE_BANDS.FI15, 0.2, CFG);
++  assert.equal(ev.usable, 260);
++  assert.ok(ev.move !== null, 'a real, tradable, after-cost cohort still supports a move');
++  assert.equal(ev.move.kind, 'LOOSEN');
++});
++
++test('FIX93-5: the production evidence bars are what they claim — the cost hurdle is this account\'s real round trip and a cohort needs 30 independent coin-hours', () => {
++  // the logic tests in learning-gate-lesson name their own (looser) cluster floor for twelve synthetic coins; this is the guard that
++  // the SHIPPED default is not quietly loosened with them. costHurdlePct is the fallback — fly.js derives 1.8 from the running
++  // policy's 0.80% taker — and it must never again sit at the superseded 0.4% schedule's 1.0.
++  assert.equal(GATE_LESSON_DEFAULTS.minClusters, 30);
++  assert.equal(GATE_LESSON_DEFAULTS.costHurdlePct, 1.8);
++  assert.equal(GATE_LESSON_DEFAULTS.minScored, 1000);
++});
+-- 
+2.43.0
+
+
+From da9ccd069b037d410ca45864d0138bb8913f8e90 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 21 Sep 2026 00:55:55 +0000
+Subject: [PATCH 2/2] =?UTF-8?q?PUBLISH-FIX-94:=20the=20watch=20sees=20the?=
+ =?UTF-8?q?=20runners=20=E2=80=94=20quiet=20is=20not=20stale,=20$500-accou?=
+ =?UTF-8?q?nt=20floors,=20five=20minutes=20to=20see=20a=20run=20start?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Artifact: learning/volatility/current.json (deployment f91b5e87, 2026-09-21 00:47 UTC) — ranked 27, skipped
+{ stale 409, thin 121, quiet 0 }, picks SUI / NEAR / AVAX / ZEC. Kraken's ticker for the same 24 h: 77 USD
+pairs ran >= 10% from the open, 29 >= 20% (SYND, NOCK, QUAI, B2, CTSI, GNOT, LAPTOP ...). 0 of 77 were in the
+Judge's boot universe; 1 of 77 was ever looked at; every one was swept by the wide eye 5-26 times.
+
+Three rules in the volatility watch kept them from the Judge:
+1. maxStaleMin 5 read a coin as a dead feed when it had not PRINTED for five minutes (the collector closes a
+   candle only when the next trade arrives). Now: the SOURCE's liveness is one question (newest receipt across
+   every coin, sourceStaleMin 5); a coin is rankable if it printed within 20 minutes.
+2. minUsdVol1h 150k / minTrades1h 60 / liquidityRefUsd 100k: the majors' bar; the runners do $2k-$260k a DAY
+   and the liquidity weight was 0 below $100k an hour. Now: the dust line for a $500 order ($10k in the hour,
+   ten prints); the weights are discounts (0.5 + 0.5*w), never a veto.
+3. minBars 30 needed half an hour of candles before measuring a range. Now 5, and the window is anchored at
+   NOW so an old spike on a coin that then went quiet cannot rank.
+
+The Judge is unchanged: its frozen book-depth, cost and sizing law on the live book remains the real gate.
+
+Tests: publish-fix-94-watch-sees-runners 6/6 (4 fail on the previous code; FIX94-2 is the early catch — a
+coin ten minutes into a run takes the first Judge slot). learning-volatility-watch 4/4 updated to the new law.
+Neighbours green: coin-dossier, social-4f-scope (tape pins untouched), learning-mover-study, mover-backfill.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01RoFoPS22WFW1oUnbWzPayd
+---
+ docs/JUDGE-PAPER-AUDIT.md                     | 15 ++++
+ learning/volatility-watch.js                  | 73 ++++++++++-----
+ test/learning-volatility-watch.test.js        | 28 +++---
+ .../publish-fix-94-watch-sees-runners.test.js | 90 +++++++++++++++++++
+ 4 files changed, 173 insertions(+), 33 deletions(-)
+ create mode 100644 test/publish-fix-94-watch-sees-runners.test.js
+
+diff --git a/docs/JUDGE-PAPER-AUDIT.md b/docs/JUDGE-PAPER-AUDIT.md
+index 8325130..618febf 100644
+--- a/docs/JUDGE-PAPER-AUDIT.md
++++ b/docs/JUDGE-PAPER-AUDIT.md
+@@ -276,6 +276,21 @@ nothing (heavy selling +0.06% at 15 minutes, strong buying +0.07%). A line someb
+   every sweep. A settlement is now a NEW attachment (this sweep's clock, superseding the row it settles); the tick report
+   names settledAtDeadline / skippedRecent / written so a stalled sweep is visible in status. Tests: publish-fix-92-settle-supersedes
+   (fails on the previous code).
++- `learning/volatility-watch.js` (PUBLISH-FIX-94, 2026-09-21; not frozen): THE WATCH SEES THE RUNNERS. Artifact: learning/volatility/
++  current.json at 2026-09-21 00:47 UTC read "ranked 27, skipped { stale 409, thin 121, quiet 0 }", picks SUI / NEAR / AVAX / ZEC; Kraken's
++  ticker for the same 24 h: 77 USD pairs ran >= 10% from the open, 29 >= 20% (SYND +24.0, NOCK +22.6, B2 +22.3 on a 62% range, CTSI +22.1 on
++  $192k/day and 26 wide-eye sweeps, GNOT, LAPTOP) — 0 of 77 in the Judge's boot universe, 1 of 77 ever looked at. Three rules in the
++  watch did it: a coin was "stale" if it had not printed for 5 minutes (the collector closes a candle only when the next trade arrives, so
++  409 healthy thin coins read as dead feeds on a quiet night); the floor was $150k an HOUR / 60 prints and the liquidity weight was 0 below
++  $100k an hour (the runners do $2k-$260k a DAY, so even a ranked runner scored 0); and 30 minutes of candles were needed before a range was
++  measured (blind to the first half hour of a run). Now: stream liveness is judged once for the whole source (newest receipt across every
++  coin, sourceStaleMin 5); a coin is rankable if it printed within maxStaleMin 20; the window is anchored at NOW (an old spike on a coin
++  that then went quiet cannot rank); minBars 5; the dust line for a $500 order is $10k in the hour and ten prints; the liquidity and
++  print-density weights are DISCOUNTS that can each at most halve the score (0.5 + 0.5·w), never a veto — big moves on modest money outrank
++  small moves on huge money, which is the owner's directive. The Judge is UNCHANGED: every nominee still faces its frozen book-depth,
++  cost and sizing law on the live book, which is where liquidity is actually decided. Coins below the dust line (SYND at $9k/day, BLUE at
++  $1k/day) are not "missed": a $500 order would be the market. Tests: publish-fix-94-watch-sees-runners (6; 4 fail on the previous code),
++  learning-volatility-watch (4, updated to the new law and saying how).
+ - `tools/gate-study-process.js` / `tools/gate-study-child.js`: the join runs in a child process every 30 minutes (90 s
+   after boot first); the main thread never reads the ledger; the lesson lands in `data/learning/gate-lessons/lesson.json`
+   (+ `state.json` with the proposal history). `fly.js` composes the reader as the Judge's port.
+diff --git a/learning/volatility-watch.js b/learning/volatility-watch.js
+index 9725379..0d1ceab 100644
+--- a/learning/volatility-watch.js
++++ b/learning/volatility-watch.js
+@@ -17,50 +17,75 @@ import { atomicWriteJson } from '../lib/jsonl.js';
+ 
+ export const VOLATILITY_WATCH_VERSION = 'learning-volatility-watch-1';
+ export const VOLATILITY_WATCH_SOURCE = 'VOLATILITY_WATCH';
++// PUBLISH-FIX-94 (2026-09-21) — THE WATCH SEES THE RUNNERS. The artifact, learning/volatility/current.json at 2026-09-21 00:47 UTC:
++// "ranked 27, skipped { stale 409, thin 121, quiet 0 }", picks SUI / NEAR / AVAX / ZEC. The same 24 hours, from Kraken's own ticker: 77
++// USD pairs ran >= 10% from their open, 29 ran >= 20% (SYND +24, NOCK +22.6, B2 +22.3 on a 62% range, CTSI +22.1 on $192k/day, GNOT,
++// LAPTOP) — 0 of the 77 in the Judge's boot universe, 1 of the 77 ever looked at, every one of them swept by the wide eye 5-26 times.
++// Three rules in THIS file kept them from the Judge:
++//   1. maxStaleMin 5 called a coin "stale" when it had not PRINTED for five minutes. The collector closes a candle only when the next trade
++//      arrives, so on a quiet Sunday night 409 healthy thin coins read as dead feeds. A quiet coin is not a stale stream: stream liveness is
++//      now judged ONCE for the whole source (the newest receipt across every coin), and a coin is rankable if it printed inside the window.
++//   2. minUsdVol1h 150k / minTrades1h 60 / liquidityRefUsd 100k: the runners do $2k-$260k a DAY. $150k an HOUR is the majors' bar, and the
++//      liquidity weight was ZERO below $100k an hour, so even a ranked runner scored 0. The floor is now the dust line for a $500 order
++//      ($10k in the hour, ten prints); the weight is 0 at $10k, 0.5 at $100k, 1 at $1M — big moves on modest money outrank small moves on
++//      huge money, which is the owner's directive ("volume and volatility, never BTC"), while dust nobody traded still scores 0.
++//   3. minBars 30 needed half an hour of candles before it would measure a range, so a coin ten minutes into a run was invisible exactly
++//      when the owner's son asked for it to be caught ("before the percentages run out"). Five minutes inside the window is enough to see a
++//      run begin; the window is anchored at NOW (not at the coin's last candle), so an old spike on a coin that then went dead cannot rank.
++// The Judge is unchanged and remains the real gate: every nominee still faces its frozen book-depth, cost and sizing law on the live book.
+ export const VOLATILITY_WATCH_DEFAULTS = Object.freeze({
+   picks: 6,               // the Judge's preparation slots
+   band: 12,               // a listed coin stays while it is still inside the top `band` (hysteresis against churn)
+-  windowMin: 60,          // the hour that is ranked
++  windowMin: 60,          // the hour that is ranked (anchored at now)
+   longWindowMin: 240,     // the four-hour range, reported beside it
+-  minBars: 30,            // at least this many of the hour's minutes must be on disk (PUBLISH-FIX-71: was 50 — after a republish the disk holds 15–30 min per coin, so the watch sat blind for half an hour)
+-  // PUBLISH-FIX-84 (2026-09-20, the owner's night): item 14 had raised this floor 100k -> 1M and it shut the mover pipe. On Kraken only
+-  // six USD pairs in the whole exchange average $1M an hour; the coins that jumped that day (CELR +20%, G +11%, B2, COQ at $40-400k an
+-  // hour) never got a single look, and the watch ranked ZERO coins all night ("stale 429, thin 102, quiet 2"). The floor is a sanity
+-  // bar against bid/ask "ranges" nobody traded; the liquidity- and density-WEIGHTED score below (also item 14) is what keeps thin money
+-  // ranked low. $150k an hour with at least a print a minute; the score does the rest.
+-  minUsdVol1h: 150_000,
+-  minTrades1h: 60,        // PUBLISH-FIX-83 item 14: at least one print a minute across the hour, else the range is a handful of prints
+-  liquidityRefUsd: 100_000, // the liquidity weight: min(1, log10(usdVol / ref) / 2) — $100k -> 0, $1M -> 0.5, $10M -> 1
+-  tradesRef1h: 120,       // the print-density weight: min(1, trades / ref) — 2 prints a minute across the hour weighs 1
+-  minRange1hPct: 0.8,     // below this the hour did not move enough to matter against fees; the list may be shorter than `picks`
+-  maxStaleMin: 5,         // the newest candle must be this fresh, else the coin's stream is stale and it is not ranked
++  minBars: 5,             // PUBLISH-FIX-94: minutes with a candle inside the window before a range is measured (was 30: blind to the first half hour of a run)
++  minUsdVol1h: 10_000,    // PUBLISH-FIX-94: the dust line for a $500 order (was 150k: the majors' bar; the runners do $2k-$260k a day)
++  minTrades1h: 10,        // PUBLISH-FIX-94: ten prints in the window (was 60), else the range is a handful of prints
++  liquidityRefUsd: 10_000, // PUBLISH-FIX-94: the liquidity weight min(1, log10(usdVol / ref) / 2) — $10k -> 0, $100k -> 0.5, $1M -> 1 (was 100k -> 0, so every runner scored 0)
++  tradesRef1h: 60,        // PUBLISH-FIX-94: the print-density weight min(1, trades / ref) — a print a minute across the hour weighs 1 (was 120)
++  minRange1hPct: 0.8,     // below this the window did not move enough to matter against fees; the list may be shorter than `picks`
++  maxStaleMin: 20,        // PUBLISH-FIX-94: a coin must have printed within this many minutes to be ranked NOW (was 5, which read quiet coins as dead feeds)
++  sourceStaleMin: 5,      // PUBLISH-FIX-94: the SOURCE is stale when its newest receipt across every coin is older than this; then nothing is ranked
+ });
+ const MIN = 60_000;
+ const round3 = (x) => (Number.isFinite(x) ? Math.round(x * 1000) / 1000 : null);
+ export const volatilityDir = (dataDir) => path.join(path.resolve(dataDir), 'learning', 'volatility');
+ export const volatilityFile = (dataDir) => path.join(volatilityDir(dataDir), 'current.json');
+ 
+-// the measures of the last `windowMin` closed minutes of one coin's candles ([openSec, o, h, l, c, v] ascending)
++// the measures of the last `windowMin` closed minutes of one coin's candles ([openSec, o, h, l, c, v] ascending).
++// PUBLISH-FIX-94: the window is anchored at NOW — [now - windowMin, now) on the minute grid — not at the coin's last candle, so a spike an
++// hour ago on a coin that then went quiet cannot be reported as "this hour". `stale` now means the coin has not printed within maxStaleMin
++// (it is quiet NOW, not a candidate), never that its feed is dead; the source's own liveness is rankByVolatility's business.
+ export function rangeMeasures(candles, { nowTs, windowMin, minBars, maxStaleMin, trades: tradeCounts = null }) {
+   if (!Array.isArray(candles) || !candles.length) return null;
+   const last = candles[candles.length - 1]; const lastEndMs = (last[0] + 60) * 1000;
+-  if (nowTs - lastEndMs > maxStaleMin * MIN) return { stale: true };
+-  const fromSec = last[0] - (windowMin - 1) * 60; let hi = -Infinity; let lo = Infinity; let usd = 0; let bars = 0; let first = null; let trades = null;
++  if (nowTs - lastEndMs > maxStaleMin * MIN) return { stale: true, ageMin: Math.round((nowTs - lastEndMs) / MIN) };
++  const endSec = Math.floor(nowTs / MIN) * 60; const fromSec = endSec - windowMin * 60; let hi = -Infinity; let lo = Infinity; let usd = 0; let bars = 0; let first = null; let lastIn = null; let trades = null;
+   for (let i = candles.length - 1; i >= 0; i -= 1) {
+-    const c = candles[i]; if (c[0] < fromSec) break;
++    const c = candles[i]; if (c[0] < fromSec) break; if (c[0] >= endSec) continue;
+     if (!(c[2] > 0 && c[3] > 0 && c[4] > 0)) continue;
++    if (!lastIn) lastIn = c;
+     if (c[2] > hi) hi = c[2]; if (c[3] < lo) lo = c[3]; usd += (c[5] ?? 0) * c[4]; bars += 1; first = c; const tc = Array.isArray(tradeCounts) ? tradeCounts[i] : null; if (Number.isSafeInteger(tc)) trades = (trades ?? 0) + tc;
+   }
+-  if (bars < minBars || !(lo > 0) || !first) return { bars, tooFew: true };
+-  return { bars, rangePct: (hi / lo - 1) * 100, retPct: (last[4] / first[1] - 1) * 100, usdVol: usd, trades, lastClose: last[4], lastOpenSec: last[0] };
++  if (bars < minBars || !(lo > 0) || !first || !lastIn) return { bars, tooFew: true };
++  return { bars, rangePct: (hi / lo - 1) * 100, retPct: (lastIn[4] / first[1] - 1) * 100, usdVol: usd, trades, lastClose: lastIn[4], lastOpenSec: lastIn[0] };
+ }
+ 
+ // pure: rank the coins of a series source; returns the ranked eligible list (best first)
+ export function rankByVolatility({ seriesSource, nowTs, cfg = VOLATILITY_WATCH_DEFAULTS, exclude = new Set() }) {
+   const out = []; let stale = 0; let thin = 0; let quiet = 0;
++  // PUBLISH-FIX-94: the SOURCE's liveness is one question for the whole stream — the newest receipt across every coin. A dead feed ranks
++  // nothing and says so; a coin that merely has not printed for a while is judged by rangeMeasures as quiet-now, not as a dead feed.
++  const gathered = []; let newestReceived = null;
+   for (const coin of seriesSource.coins()) {
+     if (exclude.has(coin)) continue;
+     const series = seriesSource(coin); const candles = series?.candles; if (!Array.isArray(candles) || !candles.length) continue;
++    if (Number.isSafeInteger(series.retrievedTsMs)) newestReceived = newestReceived === null ? series.retrievedTsMs : Math.max(newestReceived, series.retrievedTsMs);
++    gathered.push([coin, series, candles]);
++  }
++  const sourceStaleMin = cfg.sourceStaleMin ?? VOLATILITY_WATCH_DEFAULTS.sourceStaleMin;
++  if (newestReceived !== null && nowTs - newestReceived > sourceStaleMin * MIN) return { ranked: [], skipped: { stale: gathered.length, thin: 0, quiet: 0, streamStale: true, newestReceivedTs: newestReceived } };
++  for (const [coin, series, candles] of gathered) {
+     const h = rangeMeasures(candles, { nowTs, windowMin: cfg.windowMin, minBars: cfg.minBars, maxStaleMin: cfg.maxStaleMin, trades: Array.isArray(series.trades) && series.trades.length === candles.length ? series.trades : null });
+     if (!h || h.stale) { stale += 1; continue; }
+     if (h.tooFew || h.usdVol < cfg.minUsdVol1h || (h.trades !== null && h.trades < (cfg.minTrades1h ?? 0))) { thin += 1; continue; }
+@@ -68,12 +93,14 @@ export function rankByVolatility({ seriesSource, nowTs, cfg = VOLATILITY_WATCH_D
+     const l = rangeMeasures(candles, { nowTs, windowMin: cfg.longWindowMin, minBars: Math.min(cfg.minBars, cfg.longWindowMin), maxStaleMin: cfg.maxStaleMin });
+     // PUBLISH-FIX-83 item 14: the rank is the range WEIGHTED by liquidity and print density, so a 3% "range" on $200k of alternating
+     // bid/ask prints no longer outranks a 1.5% move on $20M; the raw range is still reported beside it
+-    const liquidityWeight = Math.min(1, Math.max(0, Math.log10(h.usdVol / (cfg.liquidityRefUsd ?? 100_000)) / 2)); const densityWeight = h.trades === null ? 1 : Math.min(1, h.trades / (cfg.tradesRef1h ?? 120));
+-    const score = h.rangePct * liquidityWeight * densityWeight;
++    const liquidityWeight = Math.min(1, Math.max(0, Math.log10(h.usdVol / (cfg.liquidityRefUsd ?? VOLATILITY_WATCH_DEFAULTS.liquidityRefUsd)) / 2)); const densityWeight = h.trades === null ? 1 : Math.min(1, h.trades / (cfg.tradesRef1h ?? VOLATILITY_WATCH_DEFAULTS.tradesRef1h));
++    // PUBLISH-FIX-94: the weights are DISCOUNTS, never a veto — each can at most halve the score. With a plain product a 22% run on $60k in
++    // the hour (weight 0.39) scored below a 3% wobble on $3M (weight 1); the dust line above is the veto, the weights only order what is above it.
++    const score = h.rangePct * (0.5 + 0.5 * liquidityWeight) * (0.5 + 0.5 * densityWeight);
+     out.push({ coin, symbol: `${coin}/USD`, range1hPct: round3(h.rangePct), score: round3(score), liquidityWeight: round3(liquidityWeight), densityWeight: round3(densityWeight), trades1h: h.trades, ret1hPct: round3(h.retPct), usdVol1h: Math.round(h.usdVol), range4hPct: l && !l.stale && !l.tooFew ? round3(l.rangePct) : null, lastClose: h.lastClose, lastOpenSec: h.lastOpenSec });
+   }
+   out.sort((a, b) => b.score - a.score || b.range1hPct - a.range1hPct || b.usdVol1h - a.usdVol1h || a.coin.localeCompare(b.coin));
+-  return { ranked: out, skipped: { stale, thin, quiet } };
++  return { ranked: out, skipped: { stale, thin, quiet, streamStale: false, newestReceivedTs: newestReceived } };
+ }
+ 
+ // pure: the next list from the ranking and the previous list (hysteresis: a listed coin stays while inside the band)
+@@ -110,7 +137,7 @@ export function createVolatilityWatch({ seriesSource, dataDir, clock = () => Dat
+   }
+   // the Judge's nomination shape (judge/composition.js nominate()): the ENTRY clock ranks, the affirmation keeps the TTL alive
+   const nominations = () => current.picks.map((p) => ({ symbol: p.symbol, assetId: p.coin, source: VOLATILITY_WATCH_SOURCE, nominationKnownAtTs: p.sinceTs, nominationLastSeenTs: p.affirmedTs ?? p.sinceTs }));
+-  const line = () => `VOLATILITY WATCH: ${current.picks.length ? current.picks.map((p) => `${p.coin} ${p.range1hPct}%`).join(', ') : 'no coin moved enough this hour'} (ranked ${current.ranked}${current.skipped ? `; stale ${current.skipped.stale}, thin ${current.skipped.thin}, quiet ${current.skipped.quiet}` : ''})`;
++  const line = () => `VOLATILITY WATCH: ${current.skipped?.streamStale ? 'SOURCE STALE — nothing ranked (newest receipt ' + new Date(current.skipped.newestReceivedTs).toISOString() + ')' : current.picks.length ? current.picks.map((p) => `${p.coin} ${p.range1hPct}%`).join(', ') : 'no coin moved enough this hour'} (ranked ${current.ranked}${current.skipped ? `; quiet-now ${current.skipped.stale}, thin ${current.skipped.thin}, no-range ${current.skipped.quiet}` : ''})`;
+   return { version: VOLATILITY_WATCH_VERSION, refresh, nominations, line, current: () => current, status: () => ({ version: VOLATILITY_WATCH_VERSION, picks: current.picks.slice(), ranked: current.ranked, skipped: current.skipped, counters: { ...counters }, config: { ...cfg }, authority: 'NONE' }) };
+ }
+ 
+diff --git a/test/learning-volatility-watch.test.js b/test/learning-volatility-watch.test.js
+index 039d5eb..31f0acc 100644
+--- a/test/learning-volatility-watch.test.js
++++ b/test/learning-volatility-watch.test.js
+@@ -43,14 +43,22 @@ test('VW-02. the ranking: the coins that MOVED this hour first, BTC-like coins t
+     USDT: candles({ base: 1, rangePct: 6, usdPerMin: 9_000 }),            // excluded base
+   });
+   const { ranked, skipped } = rankByVolatility({ seriesSource: src, nowTs: NOW, exclude: new Set(['USDT']) });
+-  assert.deepEqual(ranked.map((r) => r.coin), ['PEPE', 'WIF', 'AVAX', 'ZZZ'], JSON.stringify(ranked.map((r) => [r.coin, r.score, r.range1hPct, r.usdVol1h, r.trades1h])));
+-  assert.equal(skipped.quiet, 1); assert.equal(skipped.thin, 2); assert.equal(skipped.stale, 1);
+-  assert.ok(ranked[3].score < ranked[2].score && ranked[3].liquidityWeight < 0.2, 'a 12% range on $180k stays visible but ranks under a real 1.6% on $36M');
+-  assert.ok(ranked[0].range1hPct > 8 && ranked[0].usdVol1h > 2_000_000); assert.equal(ranked[0].symbol, 'PEPE/USD'); assert.ok(ranked[0].range4hPct !== null);
+-  // the rank is liquidity-weighted: PEPE 9% on $2.4M (weight ~0.69) scores ~6.2, WIF 5% on $1.5M (~0.59) ~3.0, AVAX 1.6% on $36M (weight 1, 2,400 prints over the 120 ref -> density 1) 1.6
+-  assert.ok(ranked[0].score > ranked[1].score && ranked[1].score > ranked[2].score); assert.equal(ranked[2].liquidityWeight, 1); assert.equal(ranked[2].trades1h, 2400);
+-  // a 3% "range" on barely $1.05M ranks BELOW AVAX's 1.6% on $36M: the raw range no longer wins on its own
+-  const thin = rankByVolatility({ seriesSource: source({ PEPE: candles({ base: 0.00001, rangePct: 3, usdPerMin: 17_500 }), AVAX: candles({ base: 30, rangePct: 1.6, usdPerMin: 600_000, tradesPerMin: 120 }) }), nowTs: NOW }).ranked; assert.deepEqual(thin.map((r) => r.coin), ['AVAX', 'PEPE'], JSON.stringify(thin.map((r) => [r.coin, r.score])));
++  // PUBLISH-FIX-94: the law changed and this test says how. ZZZ (12% on $180k) and DEAD (12% on $90k) are RANKED — the floor is the dust line
++  // for a $500 order ($10k), not the majors' bar; OLD (last print 20 minutes ago) is quiet-now at the edge, not a dead feed, and its window is
++  // anchored at NOW so only the part of its move inside the hour counts. SPARSE (no prints) is still thin. BTC (0.4%) is still quiet. USDT is out.
++  const by = Object.fromEntries(ranked.map((r) => [r.coin, r]));
++  assert.deepEqual(Object.keys(by).sort(), ['AVAX', 'DEAD', 'OLD', 'PEPE', 'WIF', 'ZZZ'], JSON.stringify(ranked.map((r) => [r.coin, r.score, r.range1hPct, r.usdVol1h, r.trades1h])));
++  assert.equal(skipped.quiet, 1); assert.equal(skipped.thin, 1); assert.equal(skipped.stale, 0); assert.equal(skipped.streamStale, false);
++  assert.ok(by.PEPE.range1hPct > 8 && by.PEPE.usdVol1h > 2_000_000); assert.equal(by.PEPE.symbol, 'PEPE/USD'); assert.ok(by.PEPE.range4hPct !== null);
++  // the owner's directive, in the ranking: a 12% move on $180k OUTRANKS a 9% move on $2.4M, a 5% move on $1.5M and a 1.6% move on $36M — big
++  // moves on modest money beat small moves on huge money; the liquidity weight still grades ZZZ (~0.63) below PEPE / WIF / AVAX (1), as a
++  // discount that can at most halve the score, never as a veto (PUBLISH-FIX-94)
++  assert.equal(ranked[0].coin, 'ZZZ', JSON.stringify(ranked.map((r) => [r.coin, r.score])));
++  assert.ok(by.ZZZ.score > by.PEPE.score && by.PEPE.score > by.WIF.score && by.WIF.score > by.AVAX.score, JSON.stringify([by.ZZZ.score, by.PEPE.score, by.WIF.score, by.AVAX.score]));
++  assert.ok(by.ZZZ.liquidityWeight > 0.5 && by.ZZZ.liquidityWeight < 0.75, `ZZZ weight ${by.ZZZ.liquidityWeight}`); assert.ok(by.DEAD.liquidityWeight > 0.4 && by.DEAD.liquidityWeight < by.ZZZ.liquidityWeight);
++  assert.equal(by.AVAX.liquidityWeight, 1); assert.equal(by.AVAX.trades1h, 2400); assert.equal(by.AVAX.densityWeight, 1);
++  // PUBLISH-FIX-94: a 3% move on $1.05M now outranks AVAX's 1.6% on $36M — $1M an hour is plenty for a $500 order, so the bigger move wins
++  const thin = rankByVolatility({ seriesSource: source({ PEPE: candles({ base: 0.00001, rangePct: 3, usdPerMin: 17_500 }), AVAX: candles({ base: 30, rangePct: 1.6, usdPerMin: 600_000, tradesPerMin: 120 }) }), nowTs: NOW }).ranked; assert.deepEqual(thin.map((r) => r.coin), ['PEPE', 'AVAX'], JSON.stringify(thin.map((r) => [r.coin, r.score])));
+ });
+ 
+ test('VW-03. selectPicks: entrants get the clock they entered with and keep it while inside the band; a coin leaves only when it falls out of the band; the list never exceeds picks', () => {
+@@ -87,8 +95,8 @@ test('VW-04. end to end: the source writes current.json, nominates with the entr
+     assert.equal(JSON.parse(readFileSync(volatilityFile(dir), 'utf8')).picks.length, 1);
+     assert.equal(watch.status().authority, 'NONE'); assert.equal(watch.status().counters.entered, 2); assert.equal(watch.status().counters.left, 1);
+     assert.throws(() => createVolatilityWatch({ seriesSource: () => null, dataDir: dir }), /coins\(\)/);
+-    assert.ok(VOLATILITY_WATCH_DEFAULTS.picks === 6); assert.equal(VOLATILITY_WATCH_DEFAULTS.minBars, 30, 'PUBLISH-FIX-71: 30 of the last 60 minutes rank a coin (a republish leaves 15–30 min on disk)');
++    assert.ok(VOLATILITY_WATCH_DEFAULTS.picks === 6); assert.equal(VOLATILITY_WATCH_DEFAULTS.minBars, 5, 'PUBLISH-FIX-94: five minutes inside the window are enough to see a run begin (was 30: blind to the first half hour)');
+     // PUBLISH-FIX-71: a coin with 35 of the last 60 minutes on disk is ranked (was: not until 50)
+-    { const r35 = rankByVolatility({ seriesSource: source({ ZZ: candles({ base: 3, rangePct: 6, usdPerMin: 50_000, minutes: 35 }) }), nowTs: NOW }); assert.deepEqual(r35.ranked.map((x) => x.coin), ['ZZ']); const r25 = rankByVolatility({ seriesSource: source({ ZZ: candles({ base: 3, rangePct: 6, usdPerMin: 50_000, minutes: 25 }) }), nowTs: NOW }); assert.deepEqual(r25.ranked, []); assert.equal(r25.skipped.thin, 1); }
++    { const r35 = rankByVolatility({ seriesSource: source({ ZZ: candles({ base: 3, rangePct: 6, usdPerMin: 50_000, minutes: 35 }) }), nowTs: NOW }); assert.deepEqual(r35.ranked.map((x) => x.coin), ['ZZ']); const r25 = rankByVolatility({ seriesSource: source({ ZZ: candles({ base: 3, rangePct: 6, usdPerMin: 50_000, minutes: 25 }) }), nowTs: NOW }); assert.deepEqual(r25.ranked.map((x) => x.coin), ['ZZ'], 'PUBLISH-FIX-94: 25 minutes rank too'); const r3 = rankByVolatility({ seriesSource: source({ ZZ: candles({ base: 3, rangePct: 6, usdPerMin: 50_000, minutes: 3 }) }), nowTs: NOW }); assert.deepEqual(r3.ranked, []); assert.equal(r3.skipped.thin, 1, 'under five minutes of candles is still too few'); }
+   } finally { rmSync(dir, { recursive: true, force: true }); }
+ });
+diff --git a/test/publish-fix-94-watch-sees-runners.test.js b/test/publish-fix-94-watch-sees-runners.test.js
+new file mode 100644
+index 0000000..d3eeb3e
+--- /dev/null
++++ b/test/publish-fix-94-watch-sees-runners.test.js
+@@ -0,0 +1,90 @@
++// PUBLISH-FIX-94 (2026-09-21) — THE WATCH SEES THE RUNNERS.
++//
++// Artifact: learning/volatility/current.json, deployment f91b5e87, 2026-09-21 00:47 UTC — "ranked 27, skipped { stale 409, thin 121,
++// quiet 0 }", picks SUI 6.3% / NEAR 4.7% / AVAX 4.3% / ZEC 2.0%. Kraken's ticker for the same 24 hours: 77 USD pairs ran >= 10% from the
++// open, 29 ran >= 20% (SYND +24.0, NOCK +22.6, QUAI +22.3, B2 +22.3 on a 62% range, CTSI +22.1 on $192k/day and 26 wide-eye sweeps,
++// GNOT +21.8, LAPTOP +20.7). 0 of the 77 were in the Judge's boot universe; 1 of the 77 was ever looked at. Three rules in the watch did it:
++// a coin was "stale" if it had not printed in 5 minutes (a quiet coin is not a dead feed); the floor was $150k an HOUR and the liquidity
++// weight was 0 below $100k an hour (the runners do $2k-$260k a DAY); and 30 minutes of candles were needed before a range was measured
++// (blind to the first half hour of a run). The Judge itself is unchanged: its frozen book-depth, cost and sizing law is the real gate.
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import { rangeMeasures, rankByVolatility, selectPicks, VOLATILITY_WATCH_DEFAULTS } from '../learning/volatility-watch.js';
++
++const MIN = 60_000; const NOW = Date.UTC(2026, 8, 21, 0, 47, 0); // the artifact's clock
++// candles for one coin: `prints` = [[minutesAgo, price, usd, tradesInThatMinute = 1]] (one 1-minute candle per entry, newest last); received = when the collector last heard from it
++function coinSeries(prints, { received = NOW } = {}) {
++  const rows = prints.map(([ago, px, usd, n = 1]) => ({ c: [Math.floor((NOW - ago * MIN) / MIN) * 60, px, px, px, px, usd / px], n })).sort((a, b) => a.c[0] - b.c[0]);
++  return { symbol: 'X', intervalSec: 60, retrievedTsMs: received, candles: rows.map((r) => r.c), trades: rows.map((r) => r.n) };
++}
++const src = (map) => Object.assign((coin) => map[coin] ?? null, { coins: () => Object.keys(map) });
++// a steady coin: one print a minute for the last `minutes` minutes at `px`, `usdPerMin` each
++const steady = (px, usdPerMin, minutes = 60, { received = NOW, lastAgo = 1 } = {}) => coinSeries(Array.from({ length: minutes }, (_, i) => [lastAgo + i, px, usdPerMin]), { received });
++
++test('FIX94-1 (the artifact): a thin coin that has not printed for ten minutes is quiet-now, not a dead feed — it is ranked when it moved, and the source is judged alive by its newest receipt', () => {
++  // 25 thin coins, last print 6-14 minutes ago, each with a modest move inside the hour; two majors printing every minute
++  const map = {};
++  for (let i = 0; i < 25; i += 1) map[`THIN${i}`] = coinSeries([[55, 1.00, 1000, 2], [50, 1.00, 1000, 2], [45, 1.01, 1000, 2], [40, 1.01, 1000, 2], [35, 1.02, 1000, 2], [30, 1.02, 1000, 2], [25, 1.03, 1000, 2], [20, 1.04, 1000, 2], [16, 1.05, 1000, 2], [12 + (i % 3), 1.05, 1000, 2], [9 + (i % 3), 1.06, 1000, 2], [6 + (i % 3), 1.06, 1000, 2]], { received: NOW - (6 + (i % 3)) * MIN }); // $12k on 24 prints in the hour: above the dust line, a 6% drift
++  map.SUI = steady(3.5, 50_000); map.NEAR = steady(6, 40_000);
++  const { ranked, skipped } = rankByVolatility({ seriesSource: src(map), nowTs: NOW });
++  assert.equal(skipped.streamStale, false, 'the newest receipt across the source is a minute old: the stream is alive');
++  assert.equal(skipped.stale, 0, 'no coin that printed inside the last 20 minutes is called stale (before the fix: all 25)');
++  const thin = ranked.filter((r) => r.coin.startsWith('THIN'));
++  assert.equal(thin.length, 25, `every thin coin is ranked (before the fix: none) — thin ${skipped.thin}, quiet ${skipped.quiet}`);
++  assert.ok(thin.every((r) => r.range1hPct > 5.9 && r.range1hPct < 6.1), 'the 6% move inside the hour is measured from a dozen sparse candles');
++  // and the majors, printing $50k a minute with no range, are quiet-now: they do not crowd the list
++  assert.ok(!ranked.some((r) => r.coin === 'SUI' || r.coin === 'NEAR'), JSON.stringify(ranked.map((r) => r.coin)));
++  assert.equal(skipped.quiet, 2);
++});
++
++test('FIX94-2 (the early catch): a coin ten minutes into a run, after a quiet hour, ranks at the top of the list on its first refresh', () => {
++  // CTSI-shaped: $8k an hour of background, sparse prints, then a run — 8 minutes of prints climbing 8% on $3k a minute
++  const quietHour = [[58, 0.100, 400], [47, 0.100, 300], [36, 0.101, 500], [25, 0.100, 350]];
++  const run = Array.from({ length: 8 }, (_, k) => [9 - k, 0.100 * (1 + 0.01 * (k + 1)), 3_000, 15]); // fifteen prints a minute once it runs
++  const map = { CTSI: coinSeries([...quietHour, ...run]), SUI: steady(3.5, 50_000), NEAR: steady(6, 40_000), AVAX: steady(30, 30_000) };
++  // the majors move a little
++  map.SUI.candles[map.SUI.candles.length - 1][2] *= 1.02; map.SUI.candles[0][3] *= 0.99;
++  const { ranked, skipped } = rankByVolatility({ seriesSource: src(map), nowTs: NOW });
++  const ctsi = ranked.find((r) => r.coin === 'CTSI');
++  assert.ok(ctsi, `CTSI is ranked on 12 candles in the hour (before the fix: tooFew under 30, and $25.5k in the hour was under the $150k floor) — ${JSON.stringify(skipped)}`);
++  assert.ok(ctsi.range1hPct > 7.5 && ctsi.range1hPct < 8.5, `the run so far is the range: ${ctsi.range1hPct}%`);
++  assert.equal(ranked[0].coin, 'CTSI', `an 8% run on $25k outranks a 3% wobble on $3M: ${JSON.stringify(ranked.map((r) => [r.coin, r.score]))}`);
++  assert.ok(ctsi.liquidityWeight > 0.15 && ctsi.liquidityWeight < 0.3, `$25.5k in the hour weighs ~0.2 (was 0): ${ctsi.liquidityWeight}`);
++  const picks = selectPicks(ranked, [], { nowTs: NOW, picks: 6, band: 12 });
++  assert.equal(picks[0].coin, 'CTSI', 'and it takes the first Judge slot');
++});
++
++test('FIX94-3 (a dead feed is still a dead feed): when the newest receipt across the whole source is older than sourceStaleMin, nothing is ranked and the status says so', () => {
++  const map = { A: steady(1, 20_000, 60, { received: NOW - 9 * MIN, lastAgo: 9 }), B: steady(2, 20_000, 60, { received: NOW - 12 * MIN, lastAgo: 12 }) };
++  map.A.candles[0][3] *= 0.9; map.B.candles[0][3] *= 0.9; // both "moved" 10%
++  const { ranked, skipped } = rankByVolatility({ seriesSource: src(map), nowTs: NOW });
++  assert.deepEqual(ranked, []); assert.equal(skipped.streamStale, true); assert.equal(skipped.stale, 2); assert.equal(skipped.newestReceivedTs, NOW - 9 * MIN);
++});
++
++test('FIX94-4 (dust stays out): $3k in the hour on four prints is thin; a coin whose last print is 25 minutes old is quiet-now; a coin with no range is quiet', () => {
++  const map = {
++    DUST: coinSeries([[40, 0.01, 800], [30, 0.011, 700], [20, 0.012, 900], [5, 0.013, 600]]),          // 30% "range" on $3k: dust
++    GONE: coinSeries([[58, 1, 5_000], [50, 1.1, 5_000], [40, 1.2, 5_000], [25, 1.25, 5_000]]),           // moved, but nothing for 25 minutes
++    FLAT: steady(10, 5_000),                                                                            // $300k, no range
++  };
++  const { ranked, skipped } = rankByVolatility({ seriesSource: src(map), nowTs: NOW });
++  assert.deepEqual(ranked, [], JSON.stringify(ranked)); assert.equal(skipped.thin, 1); assert.equal(skipped.stale, 1); assert.equal(skipped.quiet, 1);
++});
++
++test('FIX94-5 (the window is anchored at now): a spike an hour ago on a coin that then printed once does not read as this hour\'s range', () => {
++  // a 20% spike 70-65 minutes ago, then flat prints inside the hour: before the fix the window hung off the last candle and could reach back into the spike
++  const spike = [[70, 1.0, 5_000], [68, 1.2, 5_000], [66, 1.1, 5_000], [64, 1.0, 5_000]];
++  const flat = [[50, 1.0, 5_000], [40, 1.0, 5_000], [30, 1.0, 5_000], [20, 1.0, 5_000], [10, 1.0, 5_000], [4, 1.0, 5_000]];
++  const h = rangeMeasures(coinSeries([...spike, ...flat]).candles, { nowTs: NOW, windowMin: 60, minBars: 5, maxStaleMin: 20 });
++  assert.equal(h.bars, 6); assert.ok(h.rangePct < 0.01, `the spike is outside the window: ${h.rangePct}%`);
++  // and a coin whose only prints inside the window are old still measures only what is inside it
++  const h2 = rangeMeasures(coinSeries([[59, 1.0, 5_000], [55, 1.1, 5_000], [50, 1.05, 5_000], [45, 1.05, 5_000], [40, 1.05, 5_000], [15, 1.05, 5_000]]).candles, { nowTs: NOW, windowMin: 60, minBars: 5, maxStaleMin: 20 });
++  assert.ok(Math.abs(h2.rangePct - 10) < 0.01, `only the window counts: ${h2.rangePct}%`); assert.equal(h2.lastOpenSec, Math.floor((NOW - 15 * MIN) / MIN) * 60);
++});
++
++test('FIX94-6 (the shipped bars): the defaults are the $500-account floors, not the majors\' bar', () => {
++  assert.equal(VOLATILITY_WATCH_DEFAULTS.minBars, 5); assert.equal(VOLATILITY_WATCH_DEFAULTS.minUsdVol1h, 10_000); assert.equal(VOLATILITY_WATCH_DEFAULTS.minTrades1h, 10);
++  assert.equal(VOLATILITY_WATCH_DEFAULTS.liquidityRefUsd, 10_000); assert.equal(VOLATILITY_WATCH_DEFAULTS.tradesRef1h, 60);
++  assert.equal(VOLATILITY_WATCH_DEFAULTS.maxStaleMin, 20); assert.equal(VOLATILITY_WATCH_DEFAULTS.sourceStaleMin, 5);
++  assert.equal(VOLATILITY_WATCH_DEFAULTS.picks, 6); assert.equal(VOLATILITY_WATCH_DEFAULTS.band, 12); assert.equal(VOLATILITY_WATCH_DEFAULTS.minRange1hPct, 0.8);
++});
+-- 
+2.43.0
+
