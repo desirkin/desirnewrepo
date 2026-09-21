@@ -1,0 +1,280 @@
+From d393827c825c26f26ba0916050d74932defac28b Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 21 Sep 2026 05:14:25 +0000
+Subject: [PATCH 1/2] PUBLISH-FIX-114: one sort per book side per applied
+ message
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Production 44e7e36b, the sampled minute at 98% busy with twenty candidates:
+`sortedLevels feed.js:60 19%` was the top frame of the main thread. The feed
+sorted each side of every book with M.cmp per comparison four to six times per
+applied message (truncate, checksum, snapshot). Now sortAndTruncate sorts each
+side once, with the double of each price as the sort key (monotonic rounding;
+equal doubles fall to the exact comparator; a price failing the guard sends the
+side down M.cmp) and the one sorted, truncated array is shared by truncation,
+checksum and snapshot. Same order, CRC and digest, byte for byte — proven on a
+real feed through a snapshot and two hundred random updates.
+
+execution/*.js re-pinned (§4.45); judge and watch unchanged.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01RoFoPS22WFW1oUnbWzPayd
+---
+ docs/JUDGE-PAPER-AUDIT.md                     |  22 +++-
+ execution/feed.js                             |  36 +++++--
+ .../publish-fix-114-one-sort-per-book.test.js | 100 ++++++++++++++++++
+ 3 files changed, 147 insertions(+), 11 deletions(-)
+ create mode 100644 test/publish-fix-114-one-sort-per-book.test.js
+
+diff --git a/docs/JUDGE-PAPER-AUDIT.md b/docs/JUDGE-PAPER-AUDIT.md
+index 3ba95b9..7400562 100644
+--- a/docs/JUDGE-PAPER-AUDIT.md
++++ b/docs/JUDGE-PAPER-AUDIT.md
+@@ -61,11 +61,29 @@ Digest law: `sha256` over the sorted repository-relative file list, each entry a
+ ```
+ FROZEN_FOR_PAPER
+ judge/*.js       9453d3f2016629a2a19d0ebac6c951f3a39889554b9f7ddc3e0012ce4a3cd686
+-execution/*.js   f6421a32ef67c47a986541bed21aa3a6d5c3cce5e31dde3f7f7973a2788de025
++execution/*.js   019f8fefbace35dbfeafad17b14fac47305046434315dee07edf48e0ea5d9802
+ watch/watch.js   6f319a1ee72a2b43346b8d07f906bb3ca31566ca7e3be0180d57f551d8a1afe1
+-all (49 files)   57e646b7dfb774454cbb216f901cf59203dcb98cabfa0a23d5a7bf792dbe6b59
++all (49 files)   ef57c5ce0af99957244e1639dfe576e51eec50535a9b847717f1b86c4da1ceed
+ ```
+ 
++### 4.45 Audited change — 2026-09-21 PUBLISH-FIX-114: one sort per book side per applied message (previous execution digest `f6421a32ef67…`; now `019f8fefbace…`; all `57e646b7dfb7…` → `ef57c5ce0af9…`; judge and watch/watch.js UNCHANGED; 49 files)
++
++`execution/feed.js` only. Production `44e7e36b` (PUBLISH-FIX-110..113 live), the sampled minute at 98% busy with twenty
++candidates: `sortedLevels feed.js:60 19%` — the top frame of the main thread, ahead of `canonicalJson 10%`. Every applied
++book message sorted each side of the book with `M.cmp` per comparison FOUR to SIX times: `truncate` (when over the
++subscribed depth), `checksum` (both sides) and `snapshotOf` (both sides). Now `sortAndTruncate` sorts each side ONCE, the
++levels beyond the subscribed depth leave the map from that one sorted array, and the same (already truncated) arrays are
++handed to the checksum and the snapshot. Inside the sort the double of each price is computed once per level as the sort
++key — correct rounding is monotonic, so different doubles are ordered exactly as the decimals — and equal doubles fall to
++the exact comparator; a price that fails the fast-path guard (not a plain decimal, or over twenty characters) sends the
++whole side down `M.cmp` as before. This is the law `money.js cmp` and `features.js medianDecimal / minDecimal` already
++use. Same order, same CRC, same snapshot digest, byte for byte: `test/publish-fix-114-one-sort-per-book.test.js` (5) drives
++a real feed through a snapshot and two hundred random updates with deletes and re-inserts and checks every snapshot's
++order, CRC verification and contract against the exact comparator alone; holds the depth; proves the tie and long-lexeme
++paths; and pins the one call site. `book-snapshot-order-review`, `judge-feed-clock`, `publish-fix-83-execution`,
++`publish-fix-84-silent-feed`, the differential replay and the paper spine are green. Authority unchanged:
++PAPER_SIMULATION_ONLY.
++
+ ### 4.44 Audited change — 2026-09-21 PUBLISH-FIX-113: `fromNumberLexeme` memoised (previous execution digest `bfcff6846d4d…`; now `f6421a32ef67…`; all `9af8b8db1c86…` → `57e646b7dfb7…`; judge and watch/watch.js UNCHANGED; 49 files)
+ 
+ `execution/money.js` only. `execution/feed.js` canonicalises EVERY price and quantity on every book level and every print
+diff --git a/execution/feed.js b/execution/feed.js
+index 5467193..09db610 100644
+--- a/execution/feed.js
++++ b/execution/feed.js
+@@ -57,13 +57,30 @@ export function createExecutionFeed({ clock = () => Date.now(), limits = FEED_DE
+   const sourceClockOf = (msg) => { const d = Array.isArray(msg?.data) ? msg.data : null; if (!d || !d.length) return null; let best = null; for (const row of d) { const t = typeof row?.timestamp === 'string' ? Date.parse(row.timestamp) : NaN; if (Number.isFinite(t) && (best === null || t > best)) best = t; } return best; };
+   const emit = (ev) => { for (const fn of listeners) { try { fn(ev); } catch (err) { counters.listenerErrors += 1; if (counters.listenerErrors <= 3) log(`execution feed listener error (ignored): ${err?.message ?? err}`); } } };
+   const bookOf = (symbol) => { if (!books.has(symbol)) { const p = precisions.get(symbol) ?? null; books.set(symbol, { bids: new Map(), asks: new Map(), synced: false, lastReceiptTs: null, lastSourceTs: null, receiptSequence: 0, priceDecimals: p ? p.priceDecimals : null, qtyDecimals: p ? p.qtyDecimals : null, crcFailures: 0, lastSnapshot: null, epoch }); } return books.get(symbol); };
+-  const sortedLevels = (map, side) => [...map.entries()].sort((a, b) => (side === 'bids' ? M.cmp(b[0], a[0]) : M.cmp(a[0], b[0])));
++  // PUBLISH-FIX-114 (2026-09-21): the book was sorted FOUR to SIX times per update (truncate, checksum, snapshot — each side), every
++  // sort calling M.cmp per comparison (two regex tests and two Number() conversions, or the exact BigInt path). Production 44e7e36b,
++  // the sampled minute at 98% busy with twenty candidates: `sortedLevels feed.js:60 19%` — the top frame of the main thread. Now a
++  // side is sorted ONCE per applied message, with the double of each price computed once per level as a sort key (correct rounding
++  // is monotonic, so different doubles are ordered exactly as the decimals; equal doubles fall to the exact comparator, the same
++  // law as money.js cmp and features.js medianDecimal / minDecimal); a price that fails the fast-path guard sends the whole side
++  // down the exact comparator. Same order, byte for byte; truncation, checksum and snapshot share the one sorted array.
++  const LEVEL_FAST_RE = /^(0|[1-9]\d*)(\.\d+)?$/; const LEVEL_FAST_MAX_LEN = 20;
++  const sortedLevels = (map, side) => {
++    const entries = [...map.entries()]; const n = entries.length; const sign = side === 'bids' ? -1 : 1;
++    const keys = new Float64Array(n);
++    for (let i = 0; i < n; i += 1) { const p = entries[i][0]; if (typeof p !== 'string' || p.length > LEVEL_FAST_MAX_LEN || !LEVEL_FAST_RE.test(p)) return entries.sort((a, b) => sign * M.cmp(a[0], b[0])); keys[i] = Number(p); }
++    const idx = new Array(n); for (let i = 0; i < n; i += 1) idx[i] = i;
++    idx.sort((i, j) => { const x = keys[i]; const y = keys[j]; if (x !== y) return x < y ? -sign : sign; return sign * M.cmp(entries[i][0], entries[j][0]); });
++    const out = new Array(n); for (let i = 0; i < n; i += 1) out[i] = entries[idx[i]]; return out;
++  };
++  // one sort per side per applied message: the levels beyond the subscribed depth leave the map, and the sorted (already truncated)
++  // arrays are handed to the checksum and the snapshot instead of being sorted again
++  function sortAndTruncate(b, symbol) { const depth = depthFor(symbol); const out = { bids: null, asks: null }; for (const side of ['bids', 'asks']) { const m = b[side]; const s = sortedLevels(m, side); if (s.length > depth) { for (let i = depth; i < s.length; i += 1) m.delete(s[i][0]); s.length = depth; } out[side] = s; } return out; }
+   // the exact subscribed depth: the bound tape's depthOf (the subscription it actually holds) wins, then the admission's depth, then the constructor's
+   const depthFor = (symbol) => { const t = tape && typeof tape.depthOf === 'function' ? tape.depthOf(symbol) : null; const a = admitted.get(symbol)?.depth ?? null; const d = t ?? a ?? depthOf(symbol) ?? L.maxLevels; return Number.isSafeInteger(d) && d > 0 ? Math.min(d, L.maxLevels) : L.maxLevels; };
+-  function truncate(b, symbol) { const depth = depthFor(symbol); for (const side of ['bids', 'asks']) { const m = b[side]; if (m.size > depth) for (const [p] of sortedLevels(m, side).slice(depth)) m.delete(p); } }
+-  function checksum(b) { if (b.priceDecimals === null || b.qtyDecimals === null) return { computed: null, reason: 'PRECISION_UNKNOWN' }; let s = ''; for (const side of ['asks', 'bids']) for (const [p, q] of sortedLevels(b[side], side).slice(0, 10)) { const pd = crcDigits(p, b.priceDecimals); const qd = crcDigits(q, b.qtyDecimals); if (pd === null || qd === null) return { computed: null, reason: 'PRECISION_UNSUPPORTED' }; s += pd + qd; } return { computed: crc32(s), reason: null }; }
+-  function snapshotOf(symbol, b, { kind, sourceTs, receiptTs, crc, crcVerified, crcComputed }) {
+-    const bids = sortedLevels(b.bids, 'bids'); const asks = sortedLevels(b.asks, 'asks'); const cap = depthFor(symbol);
++  function checksum(b, sorted) { if (b.priceDecimals === null || b.qtyDecimals === null) return { computed: null, reason: 'PRECISION_UNKNOWN' }; let s = ''; for (const side of ['asks', 'bids']) for (const [p, q] of sorted[side].slice(0, 10)) { const pd = crcDigits(p, b.priceDecimals); const qd = crcDigits(q, b.qtyDecimals); if (pd === null || qd === null) return { computed: null, reason: 'PRECISION_UNSUPPORTED' }; s += pd + qd; } return { computed: crc32(s), reason: null }; }
++  function snapshotOf(symbol, b, { kind, sourceTs, receiptTs, crc, crcVerified, crcComputed }, sorted) {
++    const bids = sorted.bids; const asks = sorted.asks; const cap = depthFor(symbol); // PUBLISH-FIX-114: the one sorted, truncated array per side
+     const s = { snapshotVersion: 'execution-book-snapshot-1', symbol, canonicalCoin: coinOf(symbol), feedEpoch: epoch, receiptSequence: b.receiptSequence, nativeSequence: null, sourceTs, receiptTs, crc, crcVerified, crcComputed, synced: b.synced, instrumentDigest: admitted.get(symbol)?.specDigest ?? null, priceDecimals: b.priceDecimals, qtyDecimals: b.qtyDecimals, bids: bids.slice(0, cap).map(([p, q]) => Object.freeze([canon(p), canon(q)])), asks: asks.slice(0, cap).map(([p, q]) => Object.freeze([canon(p), canon(q)])), levelsCap: cap, truncated: bids.length > cap || asks.length > cap, kind, digest: 'x'.repeat(64) };
+     s.digest = digestOf({ ...s, digest: null }); Object.freeze(s.bids); Object.freeze(s.asks); return Object.freeze(s); // deeply immutable: no subscriber can alter a level under the digest (closeout R09)
+   }
+@@ -86,12 +103,13 @@ export function createExecutionFeed({ clock = () => Date.now(), limits = FEED_DE
+   function applyBook(symbol, d, type, receiptTs) {
+     const b = bookOf(symbol); b.receiptSequence = ++receiptSequence; const sourceTs = typeof d.timestamp === 'string' ? Date.parse(d.timestamp) || null : null;
+     let changes = null;
+-    if (type === 'snapshot') { b.bids.clear(); b.asks.clear(); b.epoch = epoch; for (const l of d.bids ?? []) b.bids.set(l.price, l.qty); for (const l of d.asks ?? []) b.asks.set(l.price, l.qty); b.synced = true; bookRequests.delete(symbol); truncate(b, symbol); }
+-    else { if (!b.synced) { counters.ignored += 1; requestBookSnapshot(symbol, 'UPDATE_WITHOUT_SNAPSHOT', receiptTs); return; } changes = []; for (const side of ['bids', 'asks']) for (const l of d[side] ?? []) { const q = canon(l.qty); changes.push([side, canon(l.price), q]); if (M.isZero(q)) b[side].delete(l.price); else b[side].set(l.price, l.qty); } truncate(b, symbol); }
+-    const crc = d.checksum === undefined ? null : Number(d.checksum); const { computed, reason } = checksum(b); if (reason === 'PRECISION_UNSUPPORTED') counters.precisionUnsupported += 1;
++    if (type === 'snapshot') { b.bids.clear(); b.asks.clear(); b.epoch = epoch; for (const l of d.bids ?? []) b.bids.set(l.price, l.qty); for (const l of d.asks ?? []) b.asks.set(l.price, l.qty); b.synced = true; bookRequests.delete(symbol); }
++    else { if (!b.synced) { counters.ignored += 1; requestBookSnapshot(symbol, 'UPDATE_WITHOUT_SNAPSHOT', receiptTs); return; } changes = []; for (const side of ['bids', 'asks']) for (const l of d[side] ?? []) { const q = canon(l.qty); changes.push([side, canon(l.price), q]); if (M.isZero(q)) b[side].delete(l.price); else b[side].set(l.price, l.qty); } }
++    const sorted = sortAndTruncate(b, symbol); // PUBLISH-FIX-114: one sort per side, shared by truncation, checksum and snapshot
++    const crc = d.checksum === undefined ? null : Number(d.checksum); const { computed, reason } = checksum(b, sorted); if (reason === 'PRECISION_UNSUPPORTED') counters.precisionUnsupported += 1;
+     let crcVerified = null; if (crc !== null && computed !== null) { crcVerified = computed === crc; if (!crcVerified) { b.crcFailures += 1; counters.crcFailures += 1; b.synced = false; b.bids.clear(); b.asks.clear(); emit({ kind: 'HEALTH', symbol, state: 'DESYNCHRONIZED', reason: 'CRC_MISMATCH', receiptTs, epoch }); return; } }
+     b.lastReceiptTs = receiptTs; b.lastSourceTs = sourceTs; counters.books += 1;
+-    const snap = snapshotOf(symbol, b, { kind: type === 'snapshot' ? 'SNAPSHOT' : 'UPDATE', sourceTs, receiptTs, crc, crcVerified, crcComputed: computed }); b.lastSnapshot = snap; emit({ kind: 'BOOK', symbol, snapshot: snap, changes: changes ? Object.freeze(changes) : null });
++    const snap = snapshotOf(symbol, b, { kind: type === 'snapshot' ? 'SNAPSHOT' : 'UPDATE', sourceTs, receiptTs, crc, crcVerified, crcComputed: computed }, sorted); b.lastSnapshot = snap; emit({ kind: 'BOOK', symbol, snapshot: snap, changes: changes ? Object.freeze(changes) : null });
+   }
+   function applyTrade(symbol, t, type, receiptTs) {
+     const ring = tradeRings.get(symbol) ?? (tradeRings.set(symbol, { set: new Set(), order: [] }), tradeRings.get(symbol)); const id = t.trade_id === undefined || t.trade_id === null ? null : String(t.trade_id);
+diff --git a/test/publish-fix-114-one-sort-per-book.test.js b/test/publish-fix-114-one-sort-per-book.test.js
+new file mode 100644
+index 0000000..b4f1c12
+--- /dev/null
++++ b/test/publish-fix-114-one-sort-per-book.test.js
+@@ -0,0 +1,100 @@
++// PUBLISH-FIX-114 (2026-09-21). The book was the main thread.
++//
++// Production 44e7e36b (PUBLISH-FIX-110..113 live), the sampled minute at 98% busy with twenty candidates on the stage:
++//     CPU PROFILE 60s: busy 56678ms idle 3303ms · top: sortedLevels feed.js:60 19% · canonicalJson contract.js:79 10%
++//                      · fromNumberLexeme 6% · (garbage collector) 5% · parseDecimalUncached 4% · parseDecimal 3% · parseLexemes 3%
++// execution/feed.js sorted every book's levels with M.cmp per comparison FOUR to SIX times per applied message (truncate when
++// over depth, the checksum, the snapshot — each side). One sort per side now, with the double of each price computed once per
++// level as the sort key and the exact comparator for equal doubles — the law money.js cmp and features.js medianDecimal /
++// minDecimal already use — and the one sorted, truncated array shared by truncation, checksum and snapshot.
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import { readFileSync } from 'node:fs';
++import { createExecutionFeed } from '../execution/feed.js';
++import { bookSnapshotError } from '../execution/contract.js';
++import { crc32 } from '../lib/crc32.js';
++import * as M from '../execution/money.js';
++import { fakeClock } from './helpers/judge.js';
++
++const SYM = 'BTC/USD';
++const inst = () => JSON.stringify({ channel: 'instrument', type: 'snapshot', data: { pairs: [{ symbol: SYM, price_precision: 1, qty_precision: 8 }] } });
++const digits = (lex, d) => { const [ip, fp = ''] = lex.split('.'); return (ip + fp.padEnd(d, '0')).replace(/^0+/, ''); };
++const crcOf = (asks, bids) => crc32([...asks.slice(0, 10), ...bids.slice(0, 10)].map(([p, q]) => digits(p, 1) + digits(q, 8)).join(''));
++const msg = (type, asks, bids, checksum, ts) => JSON.stringify({ channel: 'book', type, data: [{ symbol: SYM, asks: asks.map(([price, qty]) => ({ price, qty })), bids: bids.map(([price, qty]) => ({ price, qty })), checksum, timestamp: new Date(ts).toISOString() }] });
++const feedWith = (clock, depth = 100) => { const feed = createExecutionFeed({ clock: clock.now, depthOf: () => depth }); const events = []; feed.subscribe((e) => events.push(e)); feed.admit(SYM, { priority: 'CANDIDATE', reason: 'test' }); feed.onConnect(clock.now()); feed.ingest(inst(), clock.now()); return { feed, events }; };
++// the reference order: the exact comparator alone, as the feed sorted before this fix
++const refSort = (levels, side) => [...levels].sort((a, b) => (side === 'bids' ? M.cmp(b[0], a[0]) : M.cmp(a[0], b[0])));
++let x = 17; const rnd = () => { x = (x * 1103515245 + 12345) & 0x7fffffff; return x / 0x7fffffff; };
++const price = () => (99000 + Math.floor(rnd() * 20000) / 10).toFixed(1);
++const qty = () => (rnd() * 5).toFixed(8);
++
++test('FIX114-1: the snapshot order and the CRC are exactly what the exact comparator gives — a snapshot, then two hundred random updates with deletes and re-inserts', () => {
++  const clock = fakeClock(); const { feed, events } = feedWith(clock);
++  const asks = new Map(); const bids = new Map();
++  for (let i = 0; i < 60; i += 1) { const p = (110000 + i / 10).toFixed(1); asks.set(p, qty()); const b = (109999.9 - i / 10).toFixed(1); bids.set(b, qty()); }
++  const sortedA = () => refSort([...asks.entries()], 'asks'); const sortedB = () => refSort([...bids.entries()], 'bids');
++  feed.ingest(msg('snapshot', sortedA(), sortedB(), crcOf(sortedA(), sortedB()), clock.now()), clock.now());
++  let applied = 0;
++  for (let k = 0; k < 200; k += 1) {
++    clock.advance(50);
++    const ua = []; const ub = [];
++    for (let j = 0; j < 1 + Math.floor(rnd() * 4); j += 1) {
++      if (rnd() < 0.5) { const keys = [...asks.keys()]; const p = keys[Math.floor(rnd() * keys.length)]; if (rnd() < 0.3) { asks.delete(p); ua.push([p, '0.00000000']); } else { const q = qty(); asks.set(p, q); ua.push([p, q]); } } else { const p = (110000 + Math.floor(rnd() * 800) / 10).toFixed(1); const q = qty(); asks.set(p, q); ua.push([p, q]); }
++      if (rnd() < 0.5) { const keys = [...bids.keys()]; const p = keys[Math.floor(rnd() * keys.length)]; if (rnd() < 0.3) { bids.delete(p); ub.push([p, '0.00000000']); } else { const q = qty(); bids.set(p, q); ub.push([p, q]); } } else { const p = (109999.9 - Math.floor(rnd() * 800) / 10).toFixed(1); const q = qty(); bids.set(p, q); ub.push([p, q]); }
++    }
++    for (const [m, side] of [[asks, 'asks'], [bids, 'bids']]) for (const [p] of refSort([...m.entries()], side).slice(100)) m.delete(p); // the reference holds the subscribed depth, as the feed does
++    feed.ingest(msg('update', ua, ub, crcOf(sortedA(), sortedB()), clock.now()), clock.now());
++    const ev = events[events.length - 1]; assert.equal(ev.kind, 'BOOK', `update ${k} applied (a CRC mismatch would desynchronize)`); applied += 1;
++    const snap = ev.snapshot; assert.equal(snap.crcVerified, true, `update ${k}: CRC verified against the venue's own order`);
++    assert.deepEqual(snap.asks.map((l) => l[0]), sortedA().map((l) => M.fromNumberLexeme(l[0])), `update ${k}: asks in the exact order`);
++    assert.deepEqual(snap.bids.map((l) => l[0]), sortedB().map((l) => M.fromNumberLexeme(l[0])), `update ${k}: bids in the exact order`);
++    assert.equal(bookSnapshotError(snap), null, `update ${k}: the snapshot satisfies the contract`);
++  }
++  assert.equal(applied, 200); assert.equal(feed.status().counters.crcFailures, 0);
++});
++
++test('FIX114-2: truncation still holds the subscribed depth, and the sorted array handed on is the truncated one', () => {
++  const clock = fakeClock(); const { feed, events } = feedWith(clock, 10);
++  const asks = []; const bids = []; for (let i = 0; i < 25; i += 1) { asks.push([(110000 + i / 10).toFixed(1), '1.00000000']); bids.push([(109999.9 - i / 10).toFixed(1), '1.00000000']); }
++  feed.ingest(msg('snapshot', asks, bids, crcOf(asks, bids), clock.now()), clock.now());
++  const snap = events[events.length - 1].snapshot; assert.equal(snap.kind, 'SNAPSHOT'); assert.equal(snap.crcVerified, true);
++  assert.equal(snap.asks.length, 10); assert.equal(snap.bids.length, 10); assert.equal(snap.levelsCap, 10);
++  assert.deepEqual(snap.asks.map((l) => l[0]), asks.slice(0, 10).map((l) => M.fromNumberLexeme(l[0]))); assert.deepEqual(snap.bids.map((l) => l[0]), bids.slice(0, 10).map((l) => M.fromNumberLexeme(l[0])));
++  // a level beyond the depth arrives on an update: it is dropped from the book, the top ten are unchanged, the CRC still verifies
++  clock.advance(50); feed.ingest(msg('update', [[(110000 + 4).toFixed(1), '2.00000000']], [], crcOf(asks, bids), clock.now()), clock.now());
++  const after = events[events.length - 1].snapshot; assert.equal(after.kind, 'UPDATE'); assert.equal(after.crcVerified, true); assert.equal(after.asks.length, 10);
++  assert.deepEqual(after.asks.map((l) => l[0]), asks.slice(0, 10).map((l) => M.fromNumberLexeme(l[0])));
++});
++
++test('FIX114-3: ties and long lexemes take the exact path — the fast key is a key, never a value', () => {
++  // two lexemes with the SAME double but different exact values (0.30000000000000004 vs 0.300000000000000044) — the guard is ≤ 20 chars and
++  // equal doubles fall to M.cmp, so the exact order is kept; a 21-char lexeme fails the guard and sends the whole side down the exact comparator
++  const clock = fakeClock(); const feed = createExecutionFeed({ clock: clock.now, depthOf: () => 100 }); const events = []; feed.subscribe((e) => events.push(e));
++  feed.admit(SYM, { priority: 'CANDIDATE', reason: 'test' }); feed.onConnect(clock.now()); // no instrument: precision unknown, no CRC — order only
++  const asks = [['0.300000000000000044', '1'], ['0.30000000000000004', '1'], ['10.300000000000000001', '1'], ['0.3', '1'], ['10.3', '1']];
++  const bids = [['0.299999999999999999', '1'], ['0.29999999999999999', '1'], ['0.29', '1']];
++  assert.equal(Number('0.300000000000000044'), Number('0.30000000000000004'), 'the fixture is a real tie of doubles'); assert.equal(Number('0.299999999999999999'), Number('0.29999999999999999'));
++  feed.ingest(JSON.stringify({ channel: 'book', type: 'snapshot', data: [{ symbol: SYM, asks: asks.map(([price, qty]) => ({ price, qty })), bids: bids.map(([price, qty]) => ({ price, qty })), timestamp: new Date(clock.now()).toISOString() }] }), clock.now());
++  const snap = events[events.length - 1].snapshot; assert.equal(snap.kind, 'SNAPSHOT');
++  assert.deepEqual(snap.asks.map((l) => l[0]), refSort(asks, 'asks').map((l) => M.fromNumberLexeme(l[0])), 'asks ascending by exact value');
++  assert.deepEqual(snap.bids.map((l) => l[0]), refSort(bids, 'bids').map((l) => M.fromNumberLexeme(l[0])), 'bids descending by exact value');
++  assert.equal(bookSnapshotError(snap), null);
++});
++
++test('FIX114-4: one sort per side per applied message — the checksum and the snapshot no longer sort for themselves', () => {
++  const src = readFileSync('execution/feed.js', 'utf8');
++  assert.equal((src.match(/sortedLevels\(/g) ?? []).length, 1, 'ONE call site: sortAndTruncate'); assert.match(src, /const sortedLevels = \(map, side\) => \{/);
++  assert.match(src, /function checksum\(b, sorted\)/); assert.match(src, /for \(const \[p, q\] of sorted\[side\]\.slice\(0, 10\)\)/);
++  assert.match(src, /function snapshotOf\(symbol, b, \{ kind, sourceTs, receiptTs, crc, crcVerified, crcComputed \}, sorted\)/);
++  assert.match(src, /const sorted = sortAndTruncate\(b, symbol\);/);
++  assert.equal(src.includes('function truncate('), false, 'the separate truncation pass is gone with its sort');
++  // the fast key follows the same guard as the exact-median law: a plain decimal of at most twenty characters
++  assert.match(src, /const LEVEL_FAST_RE = \/\^\(0\|\[1-9\]\\d\*\)\(\\\.\\d\+\)\?\$\/; const LEVEL_FAST_MAX_LEN = 20;/);
++});
++
++test('FIX114-5: it is actually faster — a hundred-level book, a thousand updates', () => {
++  const run = (sorter) => { const asks = new Map(); for (let i = 0; i < 100; i += 1) asks.set((110000 + i / 10).toFixed(1), '1'); const t = process.hrtime.bigint(); for (let k = 0; k < 1000; k += 1) { asks.set((110000 + Math.floor(rnd() * 1000) / 10).toFixed(1), '2'); sorter(asks); sorter(asks); sorter(asks); } return Number(process.hrtime.bigint() - t) / 1e6; };
++  const exact = run((m) => [...m.entries()].sort((a, b) => M.cmp(a[0], b[0])));
++  const keyed = run((m) => { const e = [...m.entries()]; const keys = new Float64Array(e.length); for (let i = 0; i < e.length; i += 1) keys[i] = Number(e[i][0]); const idx = e.map((_, i) => i); idx.sort((i, j) => (keys[i] !== keys[j] ? (keys[i] < keys[j] ? -1 : 1) : M.cmp(e[i][0], e[j][0]))); return idx.map((i) => e[i]); });
++  assert.ok(keyed * 2 < exact, `keyed ${keyed.toFixed(1)}ms vs exact ${exact.toFixed(1)}ms — expected at least 2x on the comparator alone (the fix also does one sort instead of three)`);
++});
+-- 
+2.43.0
+
+
+From fd9c4beb662fd1c5c859454696c86bae559c5db7 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 21 Sep 2026 05:21:06 +0000
+Subject: [PATCH 2/2] tests: the two cobra.config.json pins catch up with
+ PUBLISH-FIX-99
+
+The full test tree (3027 tests) run against PUBLISH-FIX-114 found two fences
+still pinning cobra.config.json at its pre-FIX-99 digest: judge-focused-fences
+C01 and market-closeout-r07-e2e MC-E07. FIX-99 (hotLane.slots 6 -> 20) changed
+the file on 2026-09-21 02:24 and these two pins were missed that night. Updated
+with the reason, exactly what the pins are for. No runtime byte changed.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01RoFoPS22WFW1oUnbWzPayd
+---
+ test/judge-focused-fences.test.js    | 2 +-
+ test/market-closeout-r07-e2e.test.js | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/test/judge-focused-fences.test.js b/test/judge-focused-fences.test.js
+index a080e9a..2e3bd1d 100644
+--- a/test/judge-focused-fences.test.js
++++ b/test/judge-focused-fences.test.js
+@@ -12,7 +12,7 @@ import { execFileSync } from 'node:child_process';
+ const sha = (file) => createHash('sha256').update(readFileSync(file)).digest('hex');
+ const atHead = (file) => { try { return createHash('sha256').update(execFileSync('git', ['show', `HEAD:${file}`], { cwd: process.cwd(), maxBuffer: 64 * 1024 * 1024 })).digest('hex'); } catch { return null; } };
+ // the reviewed baseline hashes (§0): recorded before any production edit of this completion
+-const PROTECTED = { 'cobra.config.json': 'f44d5d8657e3fe391194fccb204a7599ec7ed9f4d40eabdb064bd8cf328954d7' /* PUBLISH-FIX-66 (2026-09-18): universeExpansion.hotLane 6 slots / 2 h tenure for the volatility watch (previously af5b032b…, PUBLISH-FIX-2: the legacy named-coin universe seed emptied to []); no coin named; paper base ($500) still unchanged */, 'package.json': '3858b4148f97453698418fc297439021215feee3e08106e0d35c4dd9aafa5607' /* three preexisting authorized data-only scripts + the test glob scoped to *.test.{js,mjs} (f6978cf, 2026-09-14); dependencies unchanged */, 'package-lock.json': '85ade4bd1ce094c37c89574a0adbe4e057e7d1a39358c45dcc3336925ee4ac6e' };
++const PROTECTED = { 'cobra.config.json': '9113077bfe1cbb0d8f9e583671d0fc86870c8c0b1092ba69716e4e12265aa884' /* PUBLISH-FIX-99 (2026-09-21): universeExpansion.hotLane.slots 6 -> 20 on measured headroom (previously f44d5d86…); this pin was missed that night and caught on the full run of 2026-09-21 — PUBLISH-FIX-66 (2026-09-18): universeExpansion.hotLane 6 slots / 2 h tenure for the volatility watch (previously af5b032b…, PUBLISH-FIX-2: the legacy named-coin universe seed emptied to []); no coin named; paper base ($500) still unchanged */, 'package.json': '3858b4148f97453698418fc297439021215feee3e08106e0d35c4dd9aafa5607' /* three preexisting authorized data-only scripts + the test glob scoped to *.test.{js,mjs} (f6978cf, 2026-09-14); dependencies unchanged */, 'package-lock.json': '85ade4bd1ce094c37c89574a0adbe4e057e7d1a39358c45dcc3336925ee4ac6e' };
+ const NEW_MODULES = ['judge/experiment-bundle.js', 'judge/experiment-replay.js', 'judge/experiment-store.js', 'judge/experiment.js', 'judge/experiment-records.js', 'test/helpers/offline-guard.mjs', 'test/helpers/scripted-ws.js', 'tools/offline-gate.mjs'];
+ 
+ test('C01. protected bytes and dependencies: cobra.config.json, package.json and the lockfile carry the reviewed baseline digests; doctrine/MISSION.md, the sample policies, the legacy evidence / analysis v1 contracts and every migration before 9 are byte-identical to the committed tree; the new modules import only relative modules and node builtins (no new dependency); research configuration is refused outside REPLAY and the experiment replay never initializes a PAPER / LIVE account or reads credentials', async () => {
+diff --git a/test/market-closeout-r07-e2e.test.js b/test/market-closeout-r07-e2e.test.js
+index 7a1e7ad..4660985 100644
+--- a/test/market-closeout-r07-e2e.test.js
++++ b/test/market-closeout-r07-e2e.test.js
+@@ -338,5 +338,5 @@ test('MC-E07 (joined). existing integrations are preserved: a populated Social-l
+   for (const f of ['evidence/contract.js', 'socrates/contract.js']) { const head = execFileSync('git', ['show', `HEAD:${f}`], { cwd: REPO }); assert.equal(sha256Hex(readFileSync(path.join(REPO, f))), sha256Hex(head), `${f} unchanged`); }
+   // cobra.config.json: PUBLISH-FIX-2 (2026-09-15) emptied the legacy named-coin universe seed to [] so no hardcoded
+   // coins live in any config; the retained operator paper base stays $500 (db4b1a2). Pin the new reviewed bytes.
+-  assert.equal(sha256Hex(readFileSync(path.join(REPO, 'cobra.config.json'))), 'f44d5d8657e3fe391194fccb204a7599ec7ed9f4d40eabdb064bd8cf328954d7'); // PUBLISH-FIX-83 item 38: maxHeapMb 3000, one value with the profile (was c8f956c4… PUBLISH-FIX-66)
++  assert.equal(sha256Hex(readFileSync(path.join(REPO, 'cobra.config.json'))), '9113077bfe1cbb0d8f9e583671d0fc86870c8c0b1092ba69716e4e12265aa884'); // PUBLISH-FIX-99: hotLane.slots 6 -> 20 (was f44d5d86…, PUBLISH-FIX-83 item 38: maxHeapMb 3000, one value with the profile (was c8f956c4… PUBLISH-FIX-66)
+ });
+-- 
+2.43.0
+
