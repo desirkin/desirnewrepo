@@ -60,11 +60,40 @@ Digest law: `sha256` over the sorted repository-relative file list, each entry a
 
 ```
 FROZEN_FOR_PAPER
-judge/*.js       96f83523029c1a5a9ffcac64120f667b8f84fbcd9f4eafea050804662f3e58bc
+judge/*.js       5233617b47ae5de6fd91cd180bf3c8f7360645cbbdf406f430298d72220f1abb
 execution/*.js   bfcff6846d4dfd157eb84c2a5504298ba55244c09afeb746f33a1f5d1095a9a4
 watch/watch.js   6f319a1ee72a2b43346b8d07f906bb3ca31566ca7e3be0180d57f551d8a1afe1
-all (49 files)   6016f931e15531e63a2f0d734137f914d9f8c0e2831902e4cc7806333fcd4127
+all (49 files)   e35b54c87b63c8384515ff54be10d775f05ae4a246b2d36bc8fc4bc361410e30
 ```
+
+### 4.38 Audited change — 2026-09-21 PUBLISH-FIX-101: the second look has never armed once; two right-now flow gates were missing from its set (previous judge digest `96f83523029c…`; now `5233617b47ae…`; all `6016f931e155…` → `e35b54c87b63…`; execution and watch/watch.js UNCHANGED; 49 files)
+
+`judge/judge.js` only. The second look of §4.29 (PUBLISH-FIX-79, owner directive 2026-09-19: "fix the thing that will make him
+miss the winners") had fired ZERO times since it shipped. Every JUDGE FUNNEL line on every deployment read
+`SECOND LOOK: flow-only refusals 0 -> looks retaken 0 (armed 0, dropped 0)`, and the counter is incremented on the first line of
+the arming path, so the path was never reached.
+
+Diagnosis from the snake's own records, not from reading the code: deployment 77962d92's first three decisions were all NO_TRADE
+with `top refusals: PRIOR_MID_RESPONSE_SMALL 3, RECLAIM_FI15 3, FI15 3, FI60_POSITIVE 3, FI15_FRESH_AT_D 3, PRIOR_FI_ABSORBED 2`.
+Five of those six were already in `SECOND_LOOK_FLOW_GATES`; `FI15_FRESH_AT_D` was not. The arming test is
+`refused.every((id) => SECOND_LOOK_FLOW_GATES.has(id))`, so one missing name discarded the whole chain. Over 8,076 recorded
+refused looks, `FI15_FRESH_AT_D` accompanied a flow refusal 2,307 times and `DEPTH_HOLDS_80PCT_OF_BASELINE` 1,173 times — the two
+largest reasons the feature was inert. Both are facts about the decision instant, not about the coin: `FI15_FRESH_AT_D` is the
+same 15-second buying-pressure measure as `FI15` read at D (`judge/setups.js` line 137, and it was already trusted as retryable
+in `DATA_LOOK_GATES`), and `DEPTH_HOLDS_80PCT_OF_BASELINE` is the current 10bps bid notional against the frozen median. Three
+minutes later both are different numbers, which is the whole premise of a second look.
+
+Changed: `SECOND_LOOK_FLOW_GATES` gains `FI15_FRESH_AT_D` and `DEPTH_HOLDS_80PCT_OF_BASELINE` (8 ids); `DATA_LOOK_GATES` is now
+the flow set plus `COVERAGE_60S` alone; and a chain ended by a structural refusal NAMES the gate that ended it
+(`counters.secondLookEndedBy`, bounded to 32 names, counted only when a flow gate was among the refusers) so this class of
+silent death cannot hide again — `fly.js` prints it, and the previously unreported `dataLooksScheduled`, on the funnel line.
+
+UNCHANGED: nothing structural entered the set (trend, phase, evidence dimensions, geometry, stop geometry and cost still end the
+chain), no threshold moved, no gate is skipped or weakened, the bound stays at `maxLooks` (hard-capped at 4) with the mid required
+at or above the same frozen level, and a retaken look is an ordinary fresh crossing with a fresh durable hypothesis lock judged by
+every gate at full strength. Authority unchanged: PAPER_SIMULATION_ONLY. Fenced by
+`test/publish-fix-101-second-look-actually-arms.test.js` (5 tests, including the exact live refusal set from 77962d92 and an
+explicit list of the structural gates that must still refuse).
 
 ### 4.37 Recorded change — 2026-09-21 PUBLISH-FIX-100: the stage widens from six to twenty and binds a NEW $500 account, `paper-starting-styles-usd500-fee080-wide20` (frozen core UNCHANGED; no digest moves)
 

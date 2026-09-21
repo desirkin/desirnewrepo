@@ -105,7 +105,18 @@ export function createJudge({ accountId, policy, policyDigest, dispatcher, feed,
   // frozen references, new durable lock, new confirmation, EVERY gate again at full strength. Bounded to `maxLooks` per chain
   // (a natural crossing starts a new chain); a mid below the level drops the look (the thesis is gone; a natural re-cross will
   // come). No threshold moves. Port absent: nothing here runs and the record is the baseline byte for byte.
-  const SECOND_LOOK_FLOW_GATES = new Set(['FI15', 'FI60_POSITIVE', 'RV60', 'PRIOR_FI_ABSORBED', 'PRIOR_MID_RESPONSE_SMALL', 'RECLAIM_FI15']);
+  // PUBLISH-FIX-101 (2026-09-21): the second look had NEVER armed once in the app's life — `flow-only refusals 0` on every funnel line
+  // ever printed. It was not tuning: the arming test requires EVERY refused gate to be in this set, and two gates that are pure
+  // right-now flow were missing from it, so they ended the chain on almost every look that the feature exists for.
+  //   FI15_FRESH_AT_D — the SAME 15-second buying-pressure measure as FI15, read at the decision instant (judge/setups.js line 137);
+  //     it was already trusted as retryable in DATA_LOOK_GATES below. Live companion count over four days: 2,307 — the single most
+  //     common reason a flow refusal was thrown away.
+  //   DEPTH_HOLDS_80PCT_OF_BASELINE — the CURRENT 10bps bid notional against the frozen median; a book fact about this second,
+  //     not about the coin. Companion count: 1,173.
+  // Everything structural still ends the chain exactly as before: trend (EMA5_ABOVE_EMA20), phase (CONTINUATION_PHASE_ELIGIBLE,
+  // NOT_EXHAUSTED), evidence (DISTINCT_EVIDENCE_DIMENSIONS), geometry (PULLBACK_WITHIN_1_5_ATR, COMPRESSION_5BAR, STOP_GEOMETRY).
+  // No threshold moves, no gate is skipped: a second look is a fresh crossing judged by every gate at full strength.
+  const SECOND_LOOK_FLOW_GATES = new Set(['FI15', 'FI60_POSITIVE', 'RV60', 'PRIOR_FI_ABSORBED', 'PRIOR_MID_RESPONSE_SMALL', 'RECLAIM_FI15', 'FI15_FRESH_AT_D', 'DEPTH_HOLDS_80PCT_OF_BASELINE']);
   // PUBLISH-FIX-82 GATE LEARNING (owner directive 2026-09-19): a port whose lesson() answers the learned lines { FI15: 0.15, ... }
   // for judge/setups.js LEARNABLE_GATES; each decision reads the lesson ONCE (so one look is judged on one set of lines), only
   // finite numbers inside a gate's band count, a faulting port reads as absent, and the decision carries a GATE_LEARNING row
@@ -127,7 +138,15 @@ export function createJudge({ accountId, policy, policyDigest, dispatcher, feed,
   const secondLookCfg = secondLook && typeof secondLook === 'object' ? { afterMs: Number.isFinite(secondLook.afterMs) && secondLook.afterMs >= 15_000 ? secondLook.afterMs : 180_000, maxLooks: Number.isInteger(secondLook.maxLooks) && secondLook.maxLooks >= 1 ? Math.min(secondLook.maxLooks, 4) : 2, staleMs: 120_000 } : null;
   function scheduleSecondLook(c, setupId, frozen, refused, D) {
     if (!secondLookCfg) return;
-    if (!frozen || !Array.isArray(refused) || !refused.length || !refused.every((id) => SECOND_LOOK_FLOW_GATES.has(id))) { if (c.secondLook.delete(setupId)) counters.secondLooksEnded = (counters.secondLooksEnded ?? 0) + 1; return; } // a structural refusal ends the chain (PUBLISH-FIX-83 item 37: counted)
+    if (!frozen || !Array.isArray(refused) || !refused.length || !refused.every((id) => SECOND_LOOK_FLOW_GATES.has(id))) {
+      // PUBLISH-FIX-101: a chain that ends SAYS WHICH GATE ENDED IT. Silence here is what hid a dead feature for four days: the
+      // counter read 0 and nothing named the gate doing the killing. Bounded to 32 names; flow-only refusals are never counted here.
+      if (Array.isArray(refused) && refused.length && refused.some((id) => SECOND_LOOK_FLOW_GATES.has(id))) {
+        counters.secondLookEndedBy = counters.secondLookEndedBy ?? {};
+        for (const id of refused) if (!SECOND_LOOK_FLOW_GATES.has(id) && (counters.secondLookEndedBy[id] !== undefined || Object.keys(counters.secondLookEndedBy).length < 32)) counters.secondLookEndedBy[id] = (counters.secondLookEndedBy[id] ?? 0) + 1;
+      }
+      if (c.secondLook.delete(setupId)) counters.secondLooksEnded = (counters.secondLooksEnded ?? 0) + 1; return;
+    } // a structural refusal ends the chain (PUBLISH-FIX-83 item 37: counted)
     counters.flowOnlyRefusals += 1;
     const prev = c.secondLook.get(setupId); const looks = prev ? prev.looks : 0;
     if (looks >= secondLookCfg.maxLooks) { counters.secondLooksDropped += 1; c.secondLook.delete(setupId); return; }
@@ -138,7 +157,7 @@ export function createJudge({ accountId, policy, policyDigest, dispatcher, feed,
   // crossing with no second look at all, so a mover was judged blind exactly once in its first 21 minutes and never again until the
   // mid fell below the level and re-crossed. Now a data-only refusal schedules a second look when the data can be there: at the
   // coverage clock's 21-minute mark for an RV60 coverage wait, else after the ordinary second-look delay; never more than 25 minutes out.
-  const DATA_LOOK_GATES = new Set([...SECOND_LOOK_FLOW_GATES, 'COVERAGE_60S', 'FI15_FRESH_AT_D']);
+  const DATA_LOOK_GATES = new Set([...SECOND_LOOK_FLOW_GATES, 'COVERAGE_60S']); // PUBLISH-FIX-101: FI15_FRESH_AT_D moved up into the flow set itself
   function scheduleDataLook(c, setupId, frozen, refused, D, fast) {
     if (!secondLookCfg || !frozen || !Array.isArray(refused) || !refused.length || !refused.every((id) => DATA_LOOK_GATES.has(id))) return;
     const prev = c.secondLook.get(setupId); const looks = prev ? prev.looks : 0; if (looks >= secondLookCfg.maxLooks) return;
