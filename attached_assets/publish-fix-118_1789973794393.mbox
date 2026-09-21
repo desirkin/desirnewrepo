@@ -1,0 +1,130 @@
+From 6de5f90d3aae47f45cd1005d98f4a36a2772b518 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 21 Sep 2026 06:56:29 +0000
+Subject: [PATCH] PUBLISH-FIX-118: the close call says the number
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+First close call of the wide20 account (8be1fb2f, 06:53): NEAR/USD
+ABSORPTION_RECLAIM passed every gate and the line read NO_ELIGIBLE_SIZE_ON_LADDER
+[NO_BOUNDED_FEASIBLE_LOT x3] — three rungs, one word each, not the constraint
+that bound any of them. The ladder records each rung's binding; the decision
+holds the ask and the stop. The line now prints `fraction: reason <- binding`
+per rung and ask / stop / target. Log line only; refusal and recording
+unchanged. judge/*.js re-pinned (§4.46).
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01RoFoPS22WFW1oUnbWzPayd
+---
+ docs/JUDGE-PAPER-AUDIT.md                     | 15 ++++++++--
+ judge/judge.js                                | 14 +++++++---
+ ...fix-118-close-call-says-the-number.test.js | 28 +++++++++++++++++++
+ 3 files changed, 51 insertions(+), 6 deletions(-)
+ create mode 100644 test/publish-fix-118-close-call-says-the-number.test.js
+
+diff --git a/docs/JUDGE-PAPER-AUDIT.md b/docs/JUDGE-PAPER-AUDIT.md
+index 7400562..970794d 100644
+--- a/docs/JUDGE-PAPER-AUDIT.md
++++ b/docs/JUDGE-PAPER-AUDIT.md
+@@ -60,12 +60,23 @@ Digest law: `sha256` over the sorted repository-relative file list, each entry a
+ 
+ ```
+ FROZEN_FOR_PAPER
+-judge/*.js       9453d3f2016629a2a19d0ebac6c951f3a39889554b9f7ddc3e0012ce4a3cd686
++judge/*.js       b03f77e5c07fd8c1b162c5b1377e10d0b6a71a12fef2daf44e7a5efc1c1a9953
+ execution/*.js   019f8fefbace35dbfeafad17b14fac47305046434315dee07edf48e0ea5d9802
+ watch/watch.js   6f319a1ee72a2b43346b8d07f906bb3ca31566ca7e3be0180d57f551d8a1afe1
+-all (49 files)   ef57c5ce0af99957244e1639dfe576e51eec50535a9b847717f1b86c4da1ceed
++all (49 files)   30d1e0e3b002d4ab2083ff302248d5335b3ea37539f30dc39f67035476552406
+ ```
+ 
++### 4.46 Audited change — 2026-09-21 PUBLISH-FIX-118: the close call says the number (previous judge digest `9453d3f20166…`; now `b03f77e5c07f…`; all `ef57c5ce0af9…` → `30d1e0e3b002…`; execution and watch/watch.js UNCHANGED; 49 files)
++
++`judge/judge.js`, one log line. The first close call of the wide20 account (deployment `8be1fb2f`, 06:53) read
++`NO_ELIGIBLE_SIZE_ON_LADDER [NO_BOUNDED_FEASIBLE_LOT | NO_BOUNDED_FEASIBLE_LOT | NO_BOUNDED_FEASIBLE_LOT] (cash 500, risk
++budget 15, target 4.3189)` — three rungs of the size ladder, one word each, and not the constraint that bound any of
++them, although `evaluateSizeLadder` records each rung's `binding` (the failures the bounded search observed:
++`BUFFERED_REWARD_NEGATIVE`, `REWARD_RISK_BELOW_1_5`, `CASH`, `RISK`, …) and the decision holds the ask and the structural
++stop. The line now prints, per refused rung, `fraction: reason <- binding+binding`, and `ask … stop … target …` on both
++sizing paths. The refusal, its recording and every counter are byte-for-byte as before (`test/publish-fix-118-close-call-says-the-number.test.js`,
++3). Authority unchanged: PAPER_SIMULATION_ONLY.
++
+ ### 4.45 Audited change — 2026-09-21 PUBLISH-FIX-114: one sort per book side per applied message (previous execution digest `f6421a32ef67…`; now `019f8fefbace…`; all `57e646b7dfb7…` → `ef57c5ce0af9…`; judge and watch/watch.js UNCHANGED; 49 files)
+ 
+ `execution/feed.js` only. Production `44e7e36b` (PUBLISH-FIX-110..113 live), the sampled minute at 98% busy with twenty
+diff --git a/judge/judge.js b/judge/judge.js
+index c91fc5d..ce6c1af 100644
+--- a/judge/judge.js
++++ b/judge/judge.js
+@@ -176,10 +176,16 @@ export function createJudge({ accountId, policy, policyDigest, dispatcher, feed,
+   }
+   // PUBLISH-FIX-84 (the owner's night, 2026-09-20): a look that passed EVERY gate and died at sizing is the closest he ever comes to a
+   // bite, and it left one word in the log (NO_TRADE_SIZE). It now says which number stopped it, in the owner's terms.
+-  function closeCall(c, setupId, reasons, detail, budget, setup) {
++  // PUBLISH-FIX-118 (2026-09-21): the first close call of the wide20 account read `NO_ELIGIBLE_SIZE_ON_LADDER [NO_BOUNDED_FEASIBLE_LOT |
++  // NO_BOUNDED_FEASIBLE_LOT | NO_BOUNDED_FEASIBLE_LOT]` — three rungs, one word each, and not the number that stopped any of them. The
++  // ladder already carries each rung's binding constraints (BUFFERED_REWARD_NEGATIVE, REWARD_RISK_BELOW_1_5, CASH, RISK ...); the line now
++  // prints them per rung, with the ask, the stop and the target, so the geometry of the refused trade is readable from the log alone.
++  function closeCall(c, setupId, reasons, detail, budget, setup, geometry = null) {
+     counters.closeCalls = (counters.closeCalls ?? 0) + 1;
+-    log(`CLOSE CALL: ${c.symbol} ${setupId} passed every gate; no trade size — ${reasons.join(', ')}${detail.length ? ` [${detail.join(' | ')}]` : ''} (cash ${budget?.cash ?? '?'}, risk budget ${budget?.budget ?? '?'}, target ${setup?.scenario?.target ?? '?'}${setup?.scenario?.cappedBy?.price ? ` capped by the book at ${setup.scenario.cappedBy.price}` : ''})`);
++    const geo = geometry ? ` ask ${geometry.ask ?? '?'} stop ${geometry.stop ?? '?'}` : '';
++    log(`CLOSE CALL: ${c.symbol} ${setupId} passed every gate; no trade size — ${reasons.join(', ')}${detail.length ? ` [${detail.join(' | ')}]` : ''} (cash ${budget?.cash ?? '?'}, risk budget ${budget?.budget ?? '?'},${geo} target ${setup?.scenario?.target ?? '?'}${setup?.scenario?.cappedBy?.price ? ` capped by the book at ${setup.scenario.cappedBy.price}` : ''})`);
+   }
++  const rungDetail = (x) => `${x.fraction ?? '?'}: ${x.reason}${Array.isArray(x.binding) && x.binding.length ? ` <- ${x.binding.join('+')}` : ''}`;
+   function secondLookMeasurement(c, setupId, episodeId) {
+     const p = secondLookCfg ? c.secondLook.get(setupId) : null; if (!p || p.state !== 'CROSSED' || p.episodeId !== episodeId) return [];
+     return [{ id: 'SECOND_LOOK', ok: true, value: p.looks, threshold: secondLookCfg.maxLooks, unit: 'COUNT', note: `look ${p.looks} of ${secondLookCfg.maxLooks} after a ${p.data ? 'data-only' : 'flow-only'} refusal (${p.refused.join(',')}) ${Math.round(secondLookCfg.afterMs / 60_000)} min earlier at the same level`, class: 'MEASUREMENT', ablated: false }];
+@@ -501,12 +507,12 @@ export function createJudge({ accountId, policy, policyDigest, dispatcher, feed,
+       };
+       const ladder = evaluateSizeLadder({ snapshot: snap, spec: c.spec, fee, atr14: frozen.atr14, structuralStop: frozen.structuralStop, targetPrice: setup.scenario.target, maxEntryLevel: setup.maxEntryLevel, cashAvailable: budget.cash, riskBudget: budget.budget, fractions: dynamicSizing.fractions ?? undefined, allInEvidence: dynamicSizing.allInEvidence ?? undefined, prepared, nowTs: D });
+       measurements = [...measurements, sizingMeasurement(ladder), ...sizingCandidateLog(ladder)];
+-      if (!ladder.selected) { closeCall(c, setupId, ['NO_ELIGIBLE_SIZE_ON_LADDER'], ladder.candidates.filter((x) => x.status !== 'OK').slice(0, 3).map((x) => String(x.reason)).concat(ladder.candidates.filter((x) => x.status === 'OK').slice(0, 2).map((x) => `${x.whyNotSelected ?? 'NOT_SELECTED'} p=${x.bufferedScenarioNetProfit} risk=${x.scenarioStressedLoss}`)), budget, setup); tracker.decide('ENTRY_REFUSED', now()); return recordRefusal(c, setupId, episodeId, 'ENTRY_REFUSED', ['NO_TRADE_SIZE', 'NO_ELIGIBLE_SIZE_ON_LADDER'], snap, { inputMode, caseRefs, measurements, invalidation: setup.invalidation, scenario: { target: setup.scenario.target, cappedBy: setup.scenario.cappedBy?.price ?? null, kind: 'SCENARIO_NOT_FORECAST' } }); }
++      if (!ladder.selected) { closeCall(c, setupId, ['NO_ELIGIBLE_SIZE_ON_LADDER'], ladder.candidates.filter((x) => x.status !== 'OK').slice(0, 3).map(rungDetail).concat(ladder.candidates.filter((x) => x.status === 'OK').slice(0, 2).map((x) => `${x.whyNotSelected ?? 'NOT_SELECTED'} p=${x.bufferedScenarioNetProfit} risk=${x.scenarioStressedLoss}`)), budget, setup, { ask: bookFacts(snap)?.bestAsk ?? null, stop: frozen.structuralStop ?? null }); tracker.decide('ENTRY_REFUSED', now()); return recordRefusal(c, setupId, episodeId, 'ENTRY_REFUSED', ['NO_TRADE_SIZE', 'NO_ELIGIBLE_SIZE_ON_LADDER'], snap, { inputMode, caseRefs, measurements, invalidation: setup.invalidation, scenario: { target: setup.scenario.target, cappedBy: setup.scenario.cappedBy?.price ?? null, kind: 'SCENARIO_NOT_FORECAST' } }); }
+       found = ladder.selected.found;
+     } else {
+       found = sizeSearch({ snapshot: snap, spec: c.spec, fee, atr14: frozen.atr14, structuralStop: frozen.structuralStop, targetPrice: setup.scenario.target, maxEntryLevel: setup.maxEntryLevel, cashAvailable: budget.cash, riskBudget: budget.budget });
+     }
+-    if (found.status !== 'OK') { closeCall(c, setupId, [found.reason, ...(found.binding ?? [])], found.evaluation ? [`p=${found.evaluation.bufferedScenarioNetProfit ?? '?'} risk=${found.evaluation.scenarioStressedLoss ?? '?'} cashOut=${found.evaluation.entryCashOut ?? '?'}`] : [], budget, setup); tracker.decide('ENTRY_REFUSED', now()); return recordRefusal(c, setupId, episodeId, 'ENTRY_REFUSED', ['NO_TRADE_SIZE', found.reason, ...(found.binding ?? [])], snap, { inputMode, caseRefs, measurements, invalidation: setup.invalidation, scenario: { target: setup.scenario.target, cappedBy: setup.scenario.cappedBy?.price ?? null, kind: 'SCENARIO_NOT_FORECAST' } }); }
++    if (found.status !== 'OK') { closeCall(c, setupId, [found.reason, ...(found.binding ?? [])], found.evaluation ? [`p=${found.evaluation.bufferedScenarioNetProfit ?? '?'} risk=${found.evaluation.scenarioStressedLoss ?? '?'} cashOut=${found.evaluation.entryCashOut ?? '?'}`] : [], budget, setup, { ask: bookFacts(snap)?.bestAsk ?? null, stop: frozen.structuralStop ?? null }); tracker.decide('ENTRY_REFUSED', now()); return recordRefusal(c, setupId, episodeId, 'ENTRY_REFUSED', ['NO_TRADE_SIZE', found.reason, ...(found.binding ?? [])], snap, { inputMode, caseRefs, measurements, invalidation: setup.invalidation, scenario: { target: setup.scenario.target, cappedBy: setup.scenario.cappedBy?.price ?? null, kind: 'SCENARIO_NOT_FORECAST' } }); }
+     const e = found.evaluation;
+     if (edgeStateEnabled && isEdgeSetup(setupId)) {
+       const executableEdge = executableEdgeFromEvaluation({ setupId, evaluation: e, decisionTs: D });
+diff --git a/test/publish-fix-118-close-call-says-the-number.test.js b/test/publish-fix-118-close-call-says-the-number.test.js
+new file mode 100644
+index 0000000..a9eaf04
+--- /dev/null
++++ b/test/publish-fix-118-close-call-says-the-number.test.js
+@@ -0,0 +1,28 @@
++// PUBLISH-FIX-118 (2026-09-21). The first close call of the wide20 account, deployment 8be1fb2f at 06:53:
++//     CLOSE CALL: NEAR/USD ABSORPTION_RECLAIM passed every gate; no trade size — NO_ELIGIBLE_SIZE_ON_LADDER
++//                 [NO_BOUNDED_FEASIBLE_LOT | NO_BOUNDED_FEASIBLE_LOT | NO_BOUNDED_FEASIBLE_LOT] (cash 500, risk budget 15, target 4.3189)
++// Three rungs, one word each, and not the number that stopped any of them — although the ladder records each rung's binding
++// constraints (BUFFERED_REWARD_NEGATIVE, REWARD_RISK_BELOW_1_5, CASH, RISK, ...) and the decision holds the ask and the stop. The line
++// now prints the rung's fraction, its reason and its binding constraints, plus ask / stop / target. Log line only; authority unchanged.
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import { readFileSync } from 'node:fs';
++
++const src = readFileSync('judge/judge.js', 'utf8');
++
++test('FIX118-1: each refused rung prints its fraction, reason and binding constraints', () => {
++  assert.match(src, /const rungDetail = \(x\) => `\$\{x\.fraction \?\? '\?'\}: \$\{x\.reason\}\$\{Array\.isArray\(x\.binding\) && x\.binding\.length \? ` <- \$\{x\.binding\.join\('\+'\)\}` : ''\}`;/);
++  assert.match(src, /ladder\.candidates\.filter\(\(x\) => x\.status !== 'OK'\)\.slice\(0, 3\)\.map\(rungDetail\)/);
++  assert.equal(src.includes(".slice(0, 3).map((x) => String(x.reason))"), false, 'the one-word form is gone');
++});
++
++test('FIX118-2: the line carries the ask and the stop next to the target, on both sizing paths', () => {
++  assert.match(src, /function closeCall\(c, setupId, reasons, detail, budget, setup, geometry = null\)/);
++  assert.match(src, /const geo = geometry \? ` ask \$\{geometry\.ask \?\? '\?'\} stop \$\{geometry\.stop \?\? '\?'\}` : '';/);
++  assert.equal((src.match(/\{ ask: bookFacts\(snap\)\?\.bestAsk \?\? null, stop: frozen\.structuralStop \?\? null \}/g) ?? []).length, 2, 'the ladder path and the single-search path');
++});
++
++test('FIX118-3: nothing about the refusal moved — the look is still refused and recorded exactly as before', () => {
++  assert.match(src, /closeCall\(c, setupId, \['NO_ELIGIBLE_SIZE_ON_LADDER'\][\s\S]{0,700}tracker\.decide\('ENTRY_REFUSED', now\(\)\); return recordRefusal\(c, setupId, episodeId, 'ENTRY_REFUSED', \['NO_TRADE_SIZE', 'NO_ELIGIBLE_SIZE_ON_LADDER'\]/);
++  assert.match(src, /closeCall\(c, setupId, \[found\.reason, \.\.\.\(found\.binding \?\? \[\]\)\][\s\S]{0,400}tracker\.decide\('ENTRY_REFUSED', now\(\)\); return recordRefusal\(c, setupId, episodeId, 'ENTRY_REFUSED', \['NO_TRADE_SIZE', found\.reason, \.\.\.\(found\.binding \?\? \[\]\)\]/);
++});
+-- 
+2.43.0
+
