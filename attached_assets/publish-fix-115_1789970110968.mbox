@@ -1,0 +1,202 @@
+From 19f3ac1e214c5a4e7231a3256f4e9ba1db23a61e Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 21 Sep 2026 05:54:57 +0000
+Subject: [PATCH] PUBLISH-FIX-115: the 13-second blocks get a name, and a
+ nursery they can die in
+
+Deployment 3047a8da (FIX-114 live) ran at 55-67% busy and still held the main
+thread ~13 s about once every ten minutes: the minute tick printed 5.3 s late,
+the watchdog saw 5 s of no heartbeat, the heap fell 1313 -> 558 MB in the same
+minute, and at 01:45 the same shape ended in LAG_SUSTAINED shedding six pairs.
+The watchdog's stack capture can only land after the collector releases the
+thread, so it named ordinary work.
+
+- lib/gc-report.js (diagnostic, authority NONE): every GC pause >= 250 ms on
+  its own line (kind, duration, heap), the minute's collections as one line,
+  from perf_hooks 'gc' entries. On unless SERPENT_GC_REPORT=false.
+- .replit: NODE_OPTIONS adds --max-semi-space-size=64 (V8 default 16 MB) so
+  the tens of MB/s of short-lived objects the book rate produces can die young
+  instead of being promoted and collected by a full mark-compact. The heap
+  ceiling and the run line are unchanged and fenced.
+
+No frozen byte changed.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01RoFoPS22WFW1oUnbWzPayd
+---
+ .replit                                    |  6 +-
+ fly.js                                     |  3 +
+ lib/gc-report.js                           | 48 ++++++++++++++++
+ test/publish-fix-115-gc-has-a-name.test.js | 67 ++++++++++++++++++++++
+ 4 files changed, 123 insertions(+), 1 deletion(-)
+ create mode 100644 lib/gc-report.js
+ create mode 100644 test/publish-fix-115-gc-has-a-name.test.js
+
+diff --git a/.replit b/.replit
+index 205277e..ea78042 100644
+--- a/.replit
++++ b/.replit
+@@ -53,7 +53,11 @@ DISCOVERY_ENABLED = "true"
+ SERPENT_RESEARCH_LANE = "worker"
+ # PUBLISH-FIX-9: explicit heap ceiling for the ONE paper process — V8's default (~512MB on a 2 GiB machine) froze the
+ # paper tape at 515MB (boot f7173376). The learning study child sets its own bounded ceiling and never inherits this.
+-NODE_OPTIONS = "--max-old-space-size=4096"
++# PUBLISH-FIX-115 (2026-09-21): a 64 MB young generation (V8 default 16 MB). At ~940 order-book messages a second the process
++# allocates tens of MB a second of short-lived objects (snapshots, canonical JSON for the digest, sorted levels); with a 16 MB
++# semi-space they are promoted to the old generation before they can die, the heap climbs 560 -> 1300 MB and a full
++# mark-compact stops the main thread for seconds (deployment 3047a8da, 01:34 and 01:45). A larger nursery lets them die young.
++NODE_OPTIONS = "--max-old-space-size=4096 --max-semi-space-size=64"
+ SERPENT_TAPE_WRITE_BEHIND = "true"
+ SERPENT_CPU_PROFILE = "true"
+ SERPENT_STALL_WATCHDOG = "true"
+diff --git a/fly.js b/fly.js
+index d977e0f..55bfeac 100644
+--- a/fly.js
++++ b/fly.js
+@@ -32,6 +32,7 @@ import { openPaperRuntime, startDataOnlyRuntime } from './lib/serpent-runtime.js
+ import { initPaperAccountAtBoot } from './lib/paper-account-init.js';
+ import { logBootSelfCheck, startMemoryReport } from './lib/boot-self-check.js';
+ import { startCpuProfileReport } from './lib/cpu-profile-report.js';
++import { startGcReport } from './lib/gc-report.js';
+ import { startHeapSampleReport } from './lib/heap-sample-report.js';
+ import { startMainThreadWatchdog } from './lib/main-thread-watchdog.js';
+ import { createDeepMarketSource } from './market-lab/deep-market-adapter.js';
+@@ -117,6 +118,8 @@ if (SERPENT_MODE === 'DATA_ONLY') {
+   startMemoryReport({ log: console.log });
+   // PUBLISH-FIX-10 diagnostic: opt-in main-thread sampling so a blocked loop names the code that blocked it.
+   if (process.env.SERPENT_CPU_PROFILE === 'true') startCpuProfileReport({ log: console.log });
++  // PUBLISH-FIX-115 diagnostic: every garbage-collection pause of 250 ms or more on its own line (the 13 s blocks of 3047a8da had no name).
++  if (process.env.SERPENT_GC_REPORT !== 'false') startGcReport({ log: console.log });
+   // PUBLISH-FIX-15 diagnostic: opt-in live-retention sampling so a growing heap names the allocation sites holding it.
+   if (process.env.SERPENT_HEAP_SAMPLE === 'true') startHeapSampleReport({ log: console.log });
+   // PUBLISH-FIX-10 diagnostic: a worker thread reports, from outside the loop, what a stalled main thread is stuck in.
+diff --git a/lib/gc-report.js b/lib/gc-report.js
+new file mode 100644
+index 0000000..200d6b8
+--- /dev/null
++++ b/lib/gc-report.js
+@@ -0,0 +1,48 @@
++// lib/gc-report.js — PUBLISH-FIX-115 diagnostic (2026-09-21): say WHEN the garbage collector stopped the world, and for how long.
++//
++// Production 3047a8da (PUBLISH-FIX-114 live), steady state 55-67% busy with twenty candidates and ~940 order-book messages a
++// second, still showed a 13 s block of the main thread about once every ten minutes:
++//     01:33:18 CPU LOAD ... (67%)            <- the minute tick, on time
++//     01:34:15 MAIN THREAD STALLED 5s: running JavaScript (CPU-bound on the main thread)
++//     01:34:23 CPU LOAD ... (98%)            <- the same tick, 5.3 s late: the loop was held from ~01:34:10 to 01:34:23
++//     01:34:23 MEM heap 1313/4144MB   ->   01:35:23 MEM heap 558/4144MB
++// and at 01:45 the same shape ended in `RESOURCE_WARNING lag=3468ms (LAG_SUSTAINED) — shedding 6 LEAST-FIT pairs`. The heap
++// climbs 560 -> 1300 MB and falls back in one step each time — the signature of a full mark-compact — but no line says so,
++// and the watchdog's stack capture can only land AFTER the collector releases the thread, so it names ordinary work.
++// This observer reports every garbage-collection pause at or above `minMs` (default 250 ms) from Node's own perf_hooks 'gc'
++// entries — kind, duration, heap before/after — as ONE line, and a count of the small ones once a minute. Authority NONE; the
++// observer changes nothing about collection; every failure is contained.
++import { PerformanceObserver, constants } from 'node:perf_hooks';
++
++export const GC_REPORT_MIN_MS = 250;
++export const GC_REPORT_INTERVAL_MS = 60_000;
++const KIND = { [constants.NODE_PERFORMANCE_GC_MAJOR]: 'MAJOR', [constants.NODE_PERFORMANCE_GC_MINOR]: 'MINOR', [constants.NODE_PERFORMANCE_GC_INCREMENTAL]: 'INCREMENTAL', [constants.NODE_PERFORMANCE_GC_WEAKCB]: 'WEAKCB' };
++export const gcKindName = (kind) => KIND[kind] ?? `KIND_${kind}`;
++
++export function formatPause(entry, heapMb) {
++  const d = entry.detail ?? {}; const flags = Number.isSafeInteger(d.flags) && d.flags !== 0 ? ` flags ${d.flags}` : '';
++  return `GC PAUSE ${Math.round(entry.duration)}ms ${gcKindName(d.kind)}${flags} · heap now ${heapMb}MB — the main thread was stopped for the whole pause`;
++}
++
++export function startGcReport({ log = () => {}, minMs = GC_REPORT_MIN_MS, intervalMs = GC_REPORT_INTERVAL_MS, timers = globalThis, ObserverImpl = PerformanceObserver, memory = () => process.memoryUsage() } = {}) {
++  const counts = { major: 0, majorMs: 0, minor: 0, minorMs: 0, incremental: 0, incrementalMs: 0, weakcb: 0, longest: 0 };
++  let observer = null; let timer = null;
++  const onEntry = (entry) => {
++    const kind = entry.detail?.kind; const ms = entry.duration;
++    if (kind === constants.NODE_PERFORMANCE_GC_MAJOR) { counts.major += 1; counts.majorMs += ms; } else if (kind === constants.NODE_PERFORMANCE_GC_MINOR) { counts.minor += 1; counts.minorMs += ms; } else if (kind === constants.NODE_PERFORMANCE_GC_INCREMENTAL) { counts.incremental += 1; counts.incrementalMs += ms; } else counts.weakcb += 1;
++    if (ms > counts.longest) counts.longest = ms;
++    if (ms >= minMs) { try { log(formatPause(entry, Math.round(memory().heapUsed / 1048576))); } catch { /* contained */ } }
++  };
++  try {
++    observer = new ObserverImpl((list) => { for (const entry of list.getEntries()) { try { onEntry(entry); } catch { /* contained */ } } });
++    observer.observe({ entryTypes: ['gc'] });
++    timer = timers.setInterval(() => {
++      const line = `GC 60s: major ${counts.major} (${Math.round(counts.majorMs)}ms) · minor ${counts.minor} (${Math.round(counts.minorMs)}ms) · incremental ${counts.incremental} (${Math.round(counts.incrementalMs)}ms) · longest pause ${Math.round(counts.longest)}ms`;
++      counts.major = 0; counts.majorMs = 0; counts.minor = 0; counts.minorMs = 0; counts.incremental = 0; counts.incrementalMs = 0; counts.weakcb = 0; counts.longest = 0;
++      try { log(line); } catch { /* contained */ }
++    }, intervalMs);
++    if (typeof timer?.unref === 'function') timer.unref();
++    log(`GC REPORT on (every pause >= ${minMs}ms on its own line; the minute's collections as one line every ${Math.round(intervalMs / 1000)}s)`);
++  } catch (err) { log(`GC REPORT could not start (contained): ${String(err?.message ?? err).slice(0, 120)}`); }
++  return { stop: () => { try { observer?.disconnect(); } catch { /* contained */ } if (timer !== null) timers.clearInterval(timer); }, counts };
++}
+diff --git a/test/publish-fix-115-gc-has-a-name.test.js b/test/publish-fix-115-gc-has-a-name.test.js
+new file mode 100644
+index 0000000..9ba39c0
+--- /dev/null
++++ b/test/publish-fix-115-gc-has-a-name.test.js
+@@ -0,0 +1,67 @@
++// PUBLISH-FIX-115 (2026-09-21). The 13-second blocks had no name.
++//
++// Deployment 3047a8da (FIX-114 live) ran at 55-67% busy and still held the main thread for ~13 s about once every ten minutes
++// (the minute tick printed 5.3 s late, the watchdog saw 5 s of no heartbeat, and the heap fell 1313 -> 558 MB in the same minute).
++// Two things, both authority NONE:
++//   1. lib/gc-report.js — every garbage-collection pause >= 250 ms on its own line (kind, duration, heap), the minute's
++//      collections as one line, from Node's own perf_hooks 'gc' entries. Nothing about collection changes.
++//   2. .replit — `--max-semi-space-size=64`: a 64 MB young generation so the tens of MB a second of short-lived objects the
++//      book rate produces can die young instead of being promoted and collected by a full mark-compact.
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import { readFileSync } from 'node:fs';
++import { spawnSync } from 'node:child_process';
++import { constants } from 'node:perf_hooks';
++import { startGcReport, formatPause, gcKindName, GC_REPORT_MIN_MS } from '../lib/gc-report.js';
++
++const entry = (kind, duration, flags = 0) => ({ entryType: 'gc', name: 'gc', duration, detail: { kind, flags } });
++
++test('FIX115-1: a pause at or above the floor is reported on its own line, with its kind and the heap; a small one is only counted', () => {
++  let cb = null; const lines = []; const timers = { setInterval: (fn) => ({ fn, unref() {} }), clearInterval() {} };
++  class FakeObserver { constructor(f) { cb = f; } observe() {} disconnect() {} }
++  const h = startGcReport({ log: (l) => lines.push(l), timers, ObserverImpl: FakeObserver, memory: () => ({ heapUsed: 1313 * 1048576 }) });
++  assert.match(lines[0], /^GC REPORT on \(every pause >= 250ms on its own line/);
++  cb({ getEntries: () => [entry(constants.NODE_PERFORMANCE_GC_MINOR, 12), entry(constants.NODE_PERFORMANCE_GC_MAJOR, 4213), entry(constants.NODE_PERFORMANCE_GC_INCREMENTAL, 3)] });
++  assert.equal(lines.length, 2, 'one pause line for the 4213 ms major, none for the 12 ms minor or the 3 ms step');
++  assert.equal(lines[1], 'GC PAUSE 4213ms MAJOR · heap now 1313MB — the main thread was stopped for the whole pause');
++  assert.deepEqual({ major: h.counts.major, minor: h.counts.minor, incremental: h.counts.incremental, longest: h.counts.longest }, { major: 1, minor: 1, incremental: 1, longest: 4213 });
++  assert.equal(GC_REPORT_MIN_MS, 250);
++});
++
++test('FIX115-2: the minute line carries the counts and the longest pause, then resets', () => {
++  let cb = null; let tick = null; const lines = []; const timers = { setInterval: (fn) => { tick = fn; return { unref() {} }; }, clearInterval() {} };
++  class FakeObserver { constructor(f) { cb = f; } observe() {} disconnect() {} }
++  startGcReport({ log: (l) => lines.push(l), timers, ObserverImpl: FakeObserver, memory: () => ({ heapUsed: 0 }) });
++  cb({ getEntries: () => [entry(constants.NODE_PERFORMANCE_GC_MINOR, 10), entry(constants.NODE_PERFORMANCE_GC_MINOR, 30), entry(constants.NODE_PERFORMANCE_GC_MAJOR, 900), entry(constants.NODE_PERFORMANCE_GC_INCREMENTAL, 5)] });
++  tick();
++  assert.equal(lines[lines.length - 1], 'GC 60s: major 1 (900ms) · minor 2 (40ms) · incremental 1 (5ms) · longest pause 900ms');
++  tick();
++  assert.equal(lines[lines.length - 1], 'GC 60s: major 0 (0ms) · minor 0 (0ms) · incremental 0 (0ms) · longest pause 0ms', 'reset after each minute');
++});
++
++test('FIX115-3: kinds are named from perf_hooks constants; an unknown kind is still printed, never thrown on', () => {
++  assert.equal(gcKindName(constants.NODE_PERFORMANCE_GC_MAJOR), 'MAJOR'); assert.equal(gcKindName(constants.NODE_PERFORMANCE_GC_MINOR), 'MINOR');
++  assert.equal(gcKindName(constants.NODE_PERFORMANCE_GC_INCREMENTAL), 'INCREMENTAL'); assert.equal(gcKindName(constants.NODE_PERFORMANCE_GC_WEAKCB), 'WEAKCB'); assert.equal(gcKindName(999), 'KIND_999');
++  assert.equal(formatPause(entry(constants.NODE_PERFORMANCE_GC_MAJOR, 1500.4, constants.NODE_PERFORMANCE_GC_FLAGS_FORCED), 700), `GC PAUSE 1500ms MAJOR flags ${constants.NODE_PERFORMANCE_GC_FLAGS_FORCED} · heap now 700MB — the main thread was stopped for the whole pause`);
++});
++
++test('FIX115-4: the real observer sees real collections — a forced allocation storm reports minors and majors', async () => {
++  const lines = []; const h = startGcReport({ log: (l) => lines.push(l), minMs: 0, intervalMs: 3_600_000 });
++  let keep = []; for (let i = 0; i < 2_000_000; i += 1) { keep.push({ i, s: `x${i}` }); if (keep.length > 150_000) keep = []; }
++  await new Promise((r) => setTimeout(r, 200)); h.stop();
++  assert.ok(lines.filter((l) => l.startsWith('GC PAUSE')).length >= 3, `at least a few pauses observed: ${lines.length} lines`);
++  assert.ok(lines.some((l) => / MINOR /.test(l)), 'scavenges are reported');
++});
++
++test('FIX115-5: fly.js starts it (on unless SERPENT_GC_REPORT=false), and .replit carries the nursery flag with the run line intact', () => {
++  const fly = readFileSync('fly.js', 'utf8');
++  assert.match(fly, /import \{ startGcReport \} from '\.\/lib\/gc-report\.js';/);
++  assert.match(fly, /if \(process\.env\.SERPENT_GC_REPORT !== 'false'\) startGcReport\(\{ log: console\.log \}\);/);
++  const replit = readFileSync('.replit', 'utf8');
++  assert.match(replit, /^run = \["npm", "run", "paper"\]$/m, 'the .replit trap: the deployment still runs the paper launcher');
++  assert.match(replit, /^NODE_OPTIONS = "--max-old-space-size=4096 --max-semi-space-size=64"$/m, 'the heap ceiling stays; the nursery is 64 MB');
++  assert.equal((replit.match(/^NODE_OPTIONS = /gm) ?? []).length, 1, 'exactly one NODE_OPTIONS line');
++  // and the deployed Node accepts the flag combination
++  const r = spawnSync(process.execPath, ['--max-old-space-size=4096', '--max-semi-space-size=64', '-e', 'process.stdout.write(String(require("v8").getHeapSpaceStatistics().find((s) => s.space_name === "new_space").space_size >= 0))'], { encoding: 'utf8' });
++  assert.equal(r.status, 0, `node accepts the flags: ${r.stderr}`); assert.equal(r.stdout, 'true');
++});
+-- 
+2.43.0
+
