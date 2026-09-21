@@ -76,6 +76,14 @@ export function profileEnvironment(profile, { dataDir = null } = {}) {
     RUMOR2_SOCIAL_FARCASTER_ENABLED: g.social.FARCASTER_OFFICIAL?.desiredState === 'REQUEST' || on(g.social.FARCASTER_OFFICIAL) ? 'true' : 'false',
     RUMOR2_SOCIAL_CURRENT_ENABLED: g.social.REDDIT_OFFICIAL?.desiredState === 'REQUEST' || on(g.social.REDDIT_OFFICIAL) ? 'true' : 'false',
     RUMOR2_SOCIAL_REDDIT_ENABLED: g.social.REDDIT_OFFICIAL?.desiredState === 'REQUEST' || on(g.social.REDDIT_OFFICIAL) ? 'true' : 'false',
+    // PUBLISH-FIX-97 (2026-09-21): the tape's I/O lane. The boot CPU profile read "busy 14078ms ... fsync 78% 10979ms" — four
+    // fifths of the process's working time inside synchronous disk flushes, writing every book update, trade and event as it
+    // arrived. The live funnel showed what that costs the bite lane: 119 event-loop stalls over 100 ms (46 s blocked), DB
+    // transactions p95 10.9 s on four statements carrying 0 KB, journal commits p95 40.8 s — against a proposal law that expires
+    // in 10 s, so a hypothesis lock could not land inside its own window. Ticket B built and tested the write-behind buffer for
+    // exactly this and left it opt-in; the paper profile turns it on. A flush error never reaches the bite lane and the shutdown
+    // seam drains it: the evidence is written moments later, never less completely.
+    SERPENT_TAPE_WRITE_BEHIND: g.coreObservation.tape?.writeBehind === true ? 'true' : 'false',
     WIDEEYE_ENABLED: on(g.coreObservation.wideEye) ? 'true' : 'false', GATEWAY_ENABLED: on(g.infrastructure.gateway) ? 'true' : 'false', RUMINT_ENABLED: on(g.rumorOfficial.rumintLegacy) ? 'true' : 'false',
     // PUBLISHER observation tier (press/): the profile selects the crypto publisher feeds by id; ON rows are watched, OFF rows
     // never called. Headline / link only, authority NONE, outside the frozen RUMOR-2 evidence core.

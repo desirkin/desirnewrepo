@@ -318,6 +318,22 @@ nothing (heavy selling +0.06% at 15 minutes, strong buying +0.07%). A line someb
   Judge is untouched. Tests: publish-fix-96-nothing-stale-blocks (5; all 5 fail on the previous code), tape-hot-lane (4, updated to
   the new law). Green: social-4f-scope, universe, wideeye, publish-fix-94, learning-volatility-watch, tape-resource-law,
   judge-composition, paper-runtime, coin-dossier.
+- `paper/profile.js` + `config/paper-runtime.json` (PUBLISH-FIX-97, 2026-09-21; not frozen): the tape's I/O lane is turned ON.
+  Artifact, from the deployment's own instruments: boot CPU profile "busy 14078ms idle 45962ms - top: fsync 78% 10979ms"; JUDGE
+  FUNNEL at 01:45 "LOOP 119 stalls over 100 ms (worst 2526 ms, 46161 ms blocked)", "DB tx p50 320 / p95 10892 / max 20346 ms over
+  44 (statements/tx p50 4, bytes/tx p50 0 / max 0 KB)", "pool checkout wait max 213 ms (failures 0)", "journal commit p50 547 /
+  p95 40850 / max 48629 ms", "decision compute max 30914 ms", "top refusals ... PROPOSAL_EXPIRED_10S 2". Four statements carrying
+  ZERO kilobytes took twenty seconds while the pool handed out a connection in one millisecond: the database was not slow, the
+  process could not return to it because it was inside fsync, writing every book update, trade and event synchronously as it
+  arrived (240,017 book updates in eighteen minutes). judge/judge.js gives a hypothesis lock policy.execution.proposalExpiryMs
+  (10 s) to become durable, else NEEDS_DATA / HYPOTHESIS_NOT_DURABLE, and expires the proposal past the same 10 s — so a
+  40-second journal commit makes an entry impossible however good the setup is. Ticket B had already built and tested the
+  write-behind buffer for exactly this (lib/write-behind.js, tape/store.js) and left it opt-in behind SERPENT_TAPE_WRITE_BEHIND;
+  nothing had ever turned it on. The paper profile's tape row now carries `writeBehind: true` and profileEnvironment derives the
+  flag from that row (absent means off — never implied). A flush error never reaches the bite lane; tape/run.js drains it on a
+  clean stop. The 10-second proposal law is NOT relaxed: the fix is the disk, not the deadline, and no policy byte changed.
+  Tests: publish-fix-97-io-lane-on (3; FIX97-1 fails on the previous profile). Green: paper-runtime, write-behind,
+  tape-store-write-behind, tape-startup, social-4f-scope.
 - `tools/gate-study-process.js` / `tools/gate-study-child.js`: the join runs in a child process every 30 minutes (90 s
   after boot first); the main thread never reads the ledger; the lesson lands in `data/learning/gate-lessons/lesson.json`
   (+ `state.json` with the proposal history). `fly.js` composes the reader as the Judge's port.

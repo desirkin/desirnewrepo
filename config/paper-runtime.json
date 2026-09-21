@@ -28,7 +28,7 @@
  },
  "groups": {
   "coreObservation": {
-   "tape": { "desiredState": "ON", "blockerPolicy": "BLOCK_PAPER", "module": "tape/run.js", "authority": "NONE", "note": "Kraken public WebSocket v2 market data; the only feed the Judge accepts" },
+   "tape": { "desiredState": "ON", "blockerPolicy": "BLOCK_PAPER", "module": "tape/run.js", "authority": "NONE", "writeBehind": true, "note": "Kraken public WebSocket v2 market data; the only feed the Judge accepts. writeBehind ON (PUBLISH-FIX-97): appends and coalesced latest writes go through the background flusher so the bite lane never blocks on fsync" },
    "wideEye": { "desiredState": "ON", "blockerPolicy": "DEGRADE", "module": "survey/wideeye.js", "authority": "NONE" },
    "universeExpansion": { "desiredState": "ON", "blockerPolicy": "DEGRADE", "module": "tape/universe.js", "authority": "NONE" },
    "costExecutability": { "desiredState": "ON", "blockerPolicy": "BLOCK_PAPER", "module": "cost/model.js", "authority": "NONE" },
