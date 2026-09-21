@@ -60,11 +60,32 @@ Digest law: `sha256` over the sorted repository-relative file list, each entry a
 
 ```
 FROZEN_FOR_PAPER
-judge/*.js       6e7022571afde3e41a5f864ebc037f6ed175ce9ac9c73fc324cda6d39e80a3c8
+judge/*.js       9122a83068c6f4b99d812a4c90647f6914285e2b9148a1e4f42dc68ccbbcb9ba
 execution/*.js   bfcff6846d4dfd157eb84c2a5504298ba55244c09afeb746f33a1f5d1095a9a4
 watch/watch.js   6f319a1ee72a2b43346b8d07f906bb3ca31566ca7e3be0180d57f551d8a1afe1
-all (49 files)   d393d661b0b62396ee5438abb7385df4175a274de196961af72f7e56419e4569
+all (49 files)   39a03bf6645eea9b01cb0bd5a83baf31e941ef075431f1c19f51960f59363d66
 ```
+
+### 4.40 Audited change — 2026-09-21 PUBLISH-FIX-104: a THIRD six was clamping the policy (previous judge digest `6e7022571afd…`; now `9122a83068c6…`; all `d393d661b0b6…` → `39a03bf6645e…`; execution and watch/watch.js UNCHANGED; 49 files)
+
+`judge/readiness.js` only, one constant. `PREP_SLOTS_MAX` was `6`, applied as `Math.min(PREP_SLOTS_MAX, remainingSlots)` in
+`selectPreparation`, so it is a CEILING set to exactly the number the policy used to carry. PUBLISH-FIX-99 widened the tape's hot
+lane 6 → 20 on measured headroom; PUBLISH-FIX-100 widened `policy.universe.preparationSlots` and `maxCandidates` 6 → 20 and bound
+a NEW $500 account to do it, because a policy binding is immutable per account. Deployment `dc6e5638` logged `HOT LANE: POL joins
+the deep tape now (… hot slots 20/20)` — and the next funnel line read `JUDGE FUNNEL: 6 candidates`. The policy could be widened,
+the account rebound and twenty order books carried, and the Judge would still have prepared six, silently, for ever.
+
+The policy is the authority for how many coins stand on the stage: it is digest-bound to the account (`ACCOUNT_POLICY_MISMATCH`
+on any byte) and cannot change without a new account, which is the strongest guarantee in this system. This constant exists only
+to refuse an absurd value, so it is now `64` — a real ceiling well above any policy we would write — and not a second opinion
+about the number. Nothing else in `selectPreparation` moved: the ranking law, the warm-up protection, the fair rotation of
+PUBLISH-FIX-12, the nomination TTL, held-asset exclusion and the `PREEMPTED_BY_NEWER_NOMINATION` / `NOMINATION_EXPIRED` reasons
+are byte-for-byte what they were, and a policy asking for six still gets six.
+
+Fenced by `test/publish-fix-104-no-third-six.test.js` (5 tests) which walks the WHOLE chain — shipped config → the composition's
+`Math.min(preparationSlots, maxCandidates)` → the slots actually selected — and asserts the narrowest point of the funnel's last
+stage is 20, so a fourth six in a fourth file cannot hide either. `test/judge-composition.test.js` J11 and
+`test/judge-preparation-rotation.test.js` updated with the reason. Authority unchanged: PAPER_SIMULATION_ONLY.
 
 ### 4.39 Audited change — 2026-09-21 PUBLISH-FIX-102: a control that eats a sized bite says so; the deep tape adopts on the watch's clock (previous judge digest `5233617b47ae…`; now `6e7022571afd…`; all `e35b54c87b63…` → `d393d661b0b6…`; execution and watch/watch.js UNCHANGED; 49 files; `tape/run.js` re-pinned in `test/social-4f-scope.test.js`)
 

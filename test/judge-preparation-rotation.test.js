@@ -61,5 +61,10 @@ test('F2: a rotated-out tenant does not bounce back on the next pass, and held a
   // held assets are outside the contest entirely
   const heldSel = selectPreparation({ nominations: list, held: new Set(['C01', 'C02']), remainingSlots: 6, nowTs: now });
   assert.ok(!heldSel.selected.some((n) => ['C01', 'C02'].includes(n.assetId))); assert.deepEqual(heldSel.held, ['C01', 'C02']);
-  assert.equal(PREP_SLOTS_MAX, 6);
+  // PUBLISH-FIX-104 (2026-09-21): this was 6 and it silently CLAMPED the policy — PUBLISH-FIX-100 widened
+  // policy.universe.preparationSlots 6 -> 20 (and bound a new account for it), the tape carried hot slots 20/20, and the next
+  // funnel line still read `6 candidates`. The policy is the authority; this constant only refuses an absurd value.
+  assert.equal(PREP_SLOTS_MAX, 64);
+  assert.equal(selectPreparation({ nominations: list, remainingSlots: 20, nowTs: now }).slots, 20, 'a policy asking for twenty gets twenty');
+  assert.equal(selectPreparation({ nominations: list, remainingSlots: 999, nowTs: now }).slots, 64, 'and an absurd value is still refused at the ceiling');
 });

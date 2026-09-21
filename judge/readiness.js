@@ -13,7 +13,13 @@ import { SETUPS } from './setups.js';
 
 export const READINESS_VERSION = 'judge-readiness-1';
 export const READINESS_STATES = Object.freeze(['HISTORY_WARMING', 'FLOW_WARMING', 'CASE_REQUIRED', 'READY_TO_EVALUATE', 'BLOCKED']);
-export const PREP_SLOTS_MAX = 6;
+// PUBLISH-FIX-104 (2026-09-21): this was 6, and it is a CEILING — `Math.min(PREP_SLOTS_MAX, remainingSlots)` below — so it
+// silently clamped the policy. PUBLISH-FIX-100 widened `policy.universe.preparationSlots` and `maxCandidates` 6 -> 20 and bound
+// a new account for it, the tape carried `hot slots 20/20`, and the very next funnel line still read `JUDGE FUNNEL: 6 candidates`.
+// A third six, in a different file, undoing the first two without a word. The POLICY is the authority for how many coins stand
+// on the stage (it is digest-bound to the account and cannot change without a new one); this constant exists only to refuse an
+// absurd value, so it is now a real ceiling well above any policy we would write, not a second opinion about the number.
+export const PREP_SLOTS_MAX = 64;
 // PUBLISH-FIX-12 (2026-09-17, review F2): FAIR ROTATION. Standing nominations are stamped once, so with more nominations
 // than slots the same six assets held the slots forever — the independent review's witness: 30 stable nominations, 100
 // refreshes, the same six every time, 24 never prepared. A prepared candidate now holds its slot for a TENURE (long enough
