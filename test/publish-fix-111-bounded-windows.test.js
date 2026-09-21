@@ -16,6 +16,7 @@
 // search on receiptTs skips only prints that could never be in the window. The tracker turns the hint off for good the moment a
 // print arrives out of receipt order. A plain array without the hint is scanned from the start exactly as before.
 import test from 'node:test';
+import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import { createFlowTracker, flowImbalance, vwap, windowNotional, relativeVolume60 } from '../judge/features.js';
 
@@ -84,4 +85,25 @@ test('FIX111-5: it is actually faster — a 15-second window over 25 minutes of 
   const slow = time(() => flowImbalance(trades, D - 15_000, D, { asOfTs: D, feedEpoch: 3 }));
   const fast = time(() => flowImbalance(trades, D - 15_000, D, { asOfTs: D, feedEpoch: 3, sortedByReceipt: true }));
   assert.ok(fast * 4 < slow, `bounded ${fast.toFixed(1)}ms vs full ${slow.toFixed(1)}ms for 20 calls — expected at least 4x`);
+});
+
+// ---- PUBLISH-FIX-112: the exact minimum for priorLow60 (same file, same night, same law as medianDecimal) ----------------------
+test('FIX112-1: minDecimal equals the exact decimal reduce on thousands of random lists, including ties and long lexemes', async () => {
+  const { minDecimal } = await import('../judge/features.js');
+  const M = await import('../execution/money.js');
+  let x = 42; const rnd = () => { x = (x * 1103515245 + 12345) & 0x7fffffff; return x / 0x7fffffff; };
+  for (let trial = 0; trial < 3000; trial += 1) {
+    const n = 1 + Math.floor(rnd() * 300); const list = [];
+    for (let i = 0; i < n; i += 1) { const ip = Math.floor(rnd() * 1000); const fp = Math.floor(rnd() * 1e8); list.push(rnd() < 0.3 ? String(ip) : `${ip}.${String(fp).padStart(8, '0').replace(/0+$/, '') || '0'}`); }
+    if (rnd() < 0.2) list.push(list[0]);
+    if (rnd() < 0.05) list.push('123456789012.123456789'); // longer than the fast-path guard -> exact path
+    assert.equal(minDecimal(list), list.reduce((a, b) => (M.lt(a, b) ? a : b)), `list ${trial}`);
+  }
+  assert.equal(minDecimal([]), null);
+});
+
+test('FIX112-2: windowFacts uses it for priorLow60 — the decimal-parse-per-comparison reduce is gone from the hot path', () => {
+  const src = readFileSync('judge/judge.js', 'utf8');
+  assert.match(src, /priorLow60: lows60\.length \? minDecimal\(lows60\) : null/);
+  assert.equal(src.includes('lows60.reduce((a, b) => (M.lt(a, b) ? a : b))'), false);
 });

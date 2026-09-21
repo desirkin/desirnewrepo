@@ -135,6 +135,20 @@ export function bidDepthWithinBps(snapshot, bps) { const f = bookFacts(snapshot)
 // different exact order). Same value either way; the double is a sort key only.
 const MEDIAN_FAST_RE = /^-?(0|[1-9]\d*)(\.\d+)?$/;
 const medianExact = (list) => { const s = [...list].sort((a, b) => M.cmp(a, b)); const mid = Math.floor(s.length / 2); return s.length % 2 ? s[mid] : M.div(M.add(s[mid - 1], s[mid]), '2', 8, 'HALF_UP'); };
+// PUBLISH-FIX-112 (2026-09-21): the EXACT minimum of a list of decimal lexemes, by the same law as medianDecimal below — doubles
+// are sort keys only (monotonic rounding: a smaller double is exactly smaller), and a run of equal doubles is resolved with the
+// exact comparator. windowFacts took `priorLow60` as `lows60.reduce((a, b) => (M.lt(a, b) ? a : b))` over every best bid of the last
+// sixty seconds — thousands of entries on an active book, two decimal parses per comparison, up to four times a second per
+// candidate. Production d58a8012 at 04:42, a 5 s stall: `MAIN THREAD STACK: (anonymous) judge/judge.js:351 <- windowFacts`, and
+// the sampled minute's top frame `cmp 13%`. Same value, byte for byte; a list that fails the fast-path guard takes the exact path.
+export const minDecimal = (list) => {
+  if (!list.length) return null;
+  const n = list.length; const keys = new Float64Array(n);
+  for (let i = 0; i < n; i += 1) { const v = list[i]; if (typeof v !== 'string' || v.length > 20 || !MEDIAN_FAST_RE.test(v)) return list.reduce((a, b) => (M.lt(a, b) ? a : b)); keys[i] = Number(v); }
+  let m = Infinity; for (let i = 0; i < n; i += 1) if (keys[i] < m) m = keys[i];
+  let best = null; for (let i = 0; i < n; i += 1) if (keys[i] === m) { const v = list[i]; if (best === null || M.lt(v, best)) best = v; }
+  return best;
+};
 export const medianDecimal = (list) => {
   if (!list.length) return null;
   const n = list.length; const keys = new Float64Array(n);

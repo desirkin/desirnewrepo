@@ -60,11 +60,23 @@ Digest law: `sha256` over the sorted repository-relative file list, each entry a
 
 ```
 FROZEN_FOR_PAPER
-judge/*.js       b8d814731a3a460d24b62a4a23c1a46966b91bc1939d4a243f8250b7270150c8
+judge/*.js       9453d3f2016629a2a19d0ebac6c951f3a39889554b9f7ddc3e0012ce4a3cd686
 execution/*.js   bfcff6846d4dfd157eb84c2a5504298ba55244c09afeb746f33a1f5d1095a9a4
 watch/watch.js   6f319a1ee72a2b43346b8d07f906bb3ca31566ca7e3be0180d57f551d8a1afe1
-all (49 files)   ad323dca8b886117a5aefa00e0f830518fdd4fd7624d7f22e59ecb4535c36340
+all (49 files)   9af8b8db1c8636a0cd4a9cfb3870562219e3e7fe4927730a46877c857e4bbe47
 ```
+
+### 4.43 Audited change — 2026-09-21 PUBLISH-FIX-112: `priorLow60` without a decimal parse per comparison (previous judge digest `b8d814731a3a…`; now `9453d3f20166…`; all `ad323dca8b88…` → `9af8b8db1c86…`; execution and watch/watch.js UNCHANGED; 49 files)
+
+`judge/features.js` (new `minDecimal`) and `judge/judge.js` (`windowFacts` uses it). After PUBLISH-FIX-111 the next
+sampled stall on `d58a8012` (04:42:04) read `MAIN THREAD STACK: (anonymous) judge/judge.js:351 <- windowFacts <- fastFacts`
+with the minute's top frame still `cmp 13%`: `priorLow60` was `lows60.reduce((a, b) => (M.lt(a, b) ? a : b))` over every
+best bid recorded in the last sixty seconds — thousands of entries on an active book — two decimal parses per comparison,
+up to four times a second per candidate. `minDecimal` follows exactly the law `medianDecimal` already used: doubles are sort
+keys only (a smaller double is exactly smaller), the run of equal doubles is resolved with `M.lt`, and a lexeme that fails
+the fast-path guard sends the whole list down the exact reduce. Same value, byte for byte — proven on 3,000 random lists
+with ties and over-long lexemes in `test/publish-fix-111-bounded-windows.test.js` (FIX112-1/2, now 7 tests). The
+differential replay is green. Authority unchanged: PAPER_SIMULATION_ONLY.
 
 ### 4.42 Audited change — 2026-09-21 PUBLISH-FIX-111: the flow windows were the main thread — every scan bounded by the receipt clock, exactly (previous judge digest `9122a83068c6…`; now `b8d814731a3a…`; all `39a03bf6645e…` → `ad323dca8b88…`; execution and watch/watch.js UNCHANGED; 49 files)
 
