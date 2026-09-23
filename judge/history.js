@@ -1,8 +1,15 @@
 // JUDGE — closed 1m bar history for the 61-bar indicator block (ticket §4.4). Cold start loads validated locally retained
 // bars, then permitted missing-history work goes through the existing public REST OHLC path (bounded, asynchronous,
-// retrieval / known-at floors kept); afterwards bars are continued from ACCEPTED continuous trades. A minute without an
-// observed trade has no observed price: it stays a gap (never filled from a later bar), which honestly blocks the block
-// until a refreshed retrieval supplies verified bars. Nothing here invents signed trades, quote notional or L2 history.
+// retrieval / known-at floors kept); afterwards bars are continued from ACCEPTED continuous trades. A minute with NO EVIDENCE
+// (no retrieved row, no committed live bar) stays a gap, never filled from a later bar. Nothing here invents signed trades,
+// quote notional or L2 history.
+// PUBLISH-FIX-122 (2026-09-23): a minute the VENUE ITSELF reports as zero trades (a retrieved REST row with volume 0 and count 0)
+// is not missing evidence — it is evidence that nothing traded, so the last traded price stands. It is served as a flat bar at
+// the previous observed close with zero volume, marked `carried: true`, and its known-at is the row's own receipt. It is never
+// filled from a LATER bar, and a block whose first known price would have to come from nowhere is still null. Measured on the
+// live venue, 2026-09-23 00:47-04:30Z, 359 USD pairs: only 3.2% of coin-minutes had a 61-minute block with a trade in every
+// minute, and of the 481 coin-minutes that met both runner facts (FIX-121), 13 could be judged at all — the rule "every minute
+// must have traded" made the Judge blind to almost every small coin, which is where 79-91% of runners live.
 import * as M from '../execution/money.js';
 import { BAR_MS, BARS_REQUIRED } from './features.js';
 
@@ -47,8 +54,11 @@ export function createBarHistory({ clock, fetchImpl = null, pairKeyOf = () => nu
   // the 61 contiguous complete bars ending at the latest closed minute before nowTs (null when any is missing or has no price)
   // PUBLISH-FIX-81: an optional bar count (default the Judge's 61) — the move clock asks for a two-hour block so it can measure a
   // move's age up to 120 minutes, the same horizon the mover study measures low-to-peak over; the setups still get exactly 61
-  function bars(symbol, nowTs, count = BARS_REQUIRED) { if (!Number.isSafeInteger(nowTs) || nowTs < 0) return null; const st = series.get(symbol); if (!st) return null; const end = Math.floor(nowTs / BAR_MS) * BAR_MS; const out = []; const n = Number.isSafeInteger(count) && count > 0 ? count : BARS_REQUIRED; for (let k = n; k >= 1; k -= 1) { const b = st.bars.get(end - k * BAR_MS); if (!b || b.close === null || !Number.isSafeInteger(b.knownAtTs) || b.knownAtTs < b.periodEndTs || b.knownAtTs > nowTs) return null; out.push(Object.freeze({ ...b })); } return out; }
-  function status(symbol) { const st = series.get(symbol); if (!st) return null; const end = Math.floor(clock() / BAR_MS) * BAR_MS; let missing = 0; const missingStarts = []; for (let k = BARS_REQUIRED; k >= 1; k -= 1) { const b = st.bars.get(end - k * BAR_MS); if (!b || b.close === null) { missing += 1; if (missingStarts.length < 8) missingStarts.push(end - k * BAR_MS); } } return { symbol, retained: st.bars.size, live: st.live.size, missingOf61: missing, missingStarts, lastRetrievalTs: st.lastRetrievalTs, knownAtFloorTs: st.retrievalKnownAtTs, failures: st.failures, earliestReadyTs: missing ? end + missing * BAR_MS : null }; }
+  // the last observed close strictly before `beforeTs` (bounded by what is retained), for the first carried minute of a block
+  function priorClose(st, beforeTs) { for (let t = beforeTs - BAR_MS, k = 0; k < maxBars; t -= BAR_MS, k += 1) { const b = st.bars.get(t); if (!b) return null; if (b.close !== null) return b.close; if (!zeroTradeRow(b)) return null; } return null; }
+  const zeroTradeRow = (b) => b.close === null && b.source === 'REST_OHLC' && b.tradeCount === 0 && (b.volumeBase === 0 || b.volumeBase === null);
+  function bars(symbol, nowTs, count = BARS_REQUIRED) { if (!Number.isSafeInteger(nowTs) || nowTs < 0) return null; const st = series.get(symbol); if (!st) return null; const end = Math.floor(nowTs / BAR_MS) * BAR_MS; const out = []; const n = Number.isSafeInteger(count) && count > 0 ? count : BARS_REQUIRED; let prev = null; for (let k = n; k >= 1; k -= 1) { const start = end - k * BAR_MS; const b = st.bars.get(start); if (!b || !Number.isSafeInteger(b.knownAtTs) || b.knownAtTs < b.periodEndTs || b.knownAtTs > nowTs) return null; if (b.close === null) { if (!zeroTradeRow(b)) return null; const pc = prev ?? priorClose(st, start); if (pc === null) return null; out.push(Object.freeze({ ...b, open: pc, high: pc, low: pc, close: pc, volumeBase: 0, volumeQuote: 0, tradeCount: 0, carried: true })); prev = pc; continue; } out.push(Object.freeze({ ...b })); prev = b.close; } return out; }
+  function status(symbol) { const st = series.get(symbol); if (!st) return null; const end = Math.floor(clock() / BAR_MS) * BAR_MS; let missing = 0; const missingStarts = []; for (let k = BARS_REQUIRED; k >= 1; k -= 1) { const b = st.bars.get(end - k * BAR_MS); if (!b || (b.close === null && !(zeroTradeRow(b) && priorClose(st, end - k * BAR_MS + BAR_MS) !== null))) { missing += 1; if (missingStarts.length < 8) missingStarts.push(end - k * BAR_MS); } } return { symbol, retained: st.bars.size, live: st.live.size, missingOf61: missing, missingStarts, lastRetrievalTs: st.lastRetrievalTs, knownAtFloorTs: st.retrievalKnownAtTs, failures: st.failures, earliestReadyTs: missing ? end + missing * BAR_MS : null }; }
   function needsRefresh(symbol, nowTs) { const st = series.get(symbol); return !st || st.lastRetrievalTs === null || nowTs - st.lastRetrievalTs >= refreshMs; }
   return { bars, refresh, onTrade, advance, status, needsRefresh, ingestRows, symbols: () => [...series.keys()] };
 }
