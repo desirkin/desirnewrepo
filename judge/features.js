@@ -37,7 +37,17 @@ export function indicatorBlock(bars, { referenceTs = null } = {}) {
   const coilWindow = bars.slice(-120); const coilBars = coilWindow.length;
   const h120 = Math.max(...coilWindow.map((b) => num(b.high))); const l120 = Math.min(...coilWindow.map((b) => num(b.low)));
   const last15 = bars.slice(-15); const range15 = Math.max(...last15.map((b) => num(b.high))) - Math.min(...last15.map((b) => num(b.low)));
-  return Object.freeze({ featureVersion: FEATURE_VERSION, blockDigest: barBlockDigest(bars), referenceTs: bars[bars.length - 1].periodEndTs, atr14: atr, ema5: ema(5), ema20: ema(20), h20, l20, h120, l120, range15, coilBars, envelope5, low5, prior20Return: prior20Ret, prior20High: num(last20[prior20HighIdx].high), prior20HighBarsFromEnd: 19 - prior20HighIdx, prior20Low: l20, last3Low, last2High, lastClose: closes[closes.length - 1], bars: bars.length, trueRanges: trs.length });
+  // PUBLISH-FIX-121 (2026-09-22): the runner. Cole's second study — 200 USD pairs, 2.46 days of 5-minute bars, every rule found
+  // on the first half of the timeline and scored on the second half it never saw — replaced the coil with what a coin about
+  // to jump +9% inside 20 minutes actually looks like in the hour before: the hour's high-to-low range is 8.5% of price or more
+  // (34% of runner moments, 1.9% of ordinary ones: 17.7x), and it is TRADING now (last bar's quote volume at or above 0.7x its
+  // own hour median). Together, on the unseen half: one bite in eighteen landed on a runner moment against one in 310 blind.
+  // Two facts for it: the last closed bar's quote volume and the median quote volume of the block. A bar without a known
+  // volume is left out of the median and says so in `volBars`; a block with none makes the fact UNKNOWN, never assumed.
+  const vols = bars.map((b) => num(b.volumeQuote)).filter((v) => Number.isFinite(v) && v >= 0); const volBars = vols.length;
+  const volSorted = [...vols].sort((a, b) => a - b); const volMed = volBars ? volSorted[Math.floor(volBars / 2)] : null;
+  const lastVolRaw = num(bars[bars.length - 1].volumeQuote); const volLast = Number.isFinite(lastVolRaw) && lastVolRaw >= 0 ? lastVolRaw : null;
+  return Object.freeze({ featureVersion: FEATURE_VERSION, blockDigest: barBlockDigest(bars), referenceTs: bars[bars.length - 1].periodEndTs, atr14: atr, ema5: ema(5), ema20: ema(20), h20, l20, h120, l120, range15, coilBars, volLast, volMed, volBars, envelope5, low5, prior20Return: prior20Ret, prior20High: num(last20[prior20HighIdx].high), prior20HighBarsFromEnd: 19 - prior20HighIdx, prior20Low: l20, last3Low, last2High, lastClose: closes[closes.length - 1], bars: bars.length, trueRanges: trs.length });
 }
 // confirmed swing high: strictly above two bars on either side, all five closed before the reference; nearest strictly above `entry`.
 // PUBLISH-FIX-85 (2026-09-20): `minAbove` — a swing high closer to the entry than this distance is noise, not a target: the nearest
