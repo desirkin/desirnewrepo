@@ -24,6 +24,8 @@ export function createPaperAdapter({ accountId, clock, feed = null, fee, specOf,
   // A source that returns a non-finite / non-positive value is treated as "no measurement" — the sim never fills faster
   // than the fallback on a bad reading. Read per fill so a mid-run degradation widens the very next arrival.
   const arrivalLatency = (fallback) => { if (typeof latencySource !== 'function') return fallback; let ms; try { ms = latencySource(); } catch { return fallback; } return typeof ms === 'number' && Number.isFinite(ms) && ms > 0 ? ms : fallback; };
+  // PUBLISH-FIX-125: the last accepted book per pair (cleared on any feed epoch) — the book that STANDS when nothing changes after arrival
+  const lastBook = new Map();
   const listeners = new Set(); const pending = new Map(); const stops = new Map(); const orders = new Map(); const depletion = new Map(); const firstSnapshotSeen = new Set();
   let admission = true; let seq = 0; let execSeq = 0; const counters = { submitted: 0, filled: 0, partial: 0, unfilledCoverageUnknown: 0, stopsTriggered: 0, extraObservationWaits: [], uncertainLevels: 0 };
   const emit = (type, payload, receiptTs) => { const ev = adapterEvent('PAPER', type, payload, receiptTs); for (const fn of listeners) { try { fn(ev); } catch (err) { log(`paper listener error: ${err?.message ?? err}`); } } return ev; };
@@ -44,7 +46,7 @@ export function createPaperAdapter({ accountId, clock, feed = null, fee, specOf,
   const dep = (k) => depletion.get(k) ?? (depletion.set(k, { generation: 1, consumed: '0', uncertain: false, tombstone: false, lastObserved: null }), depletion.get(k));
   const available = (pair, side, price, qty) => { const d = depletion.get(key(pair, side, price)); if (!d) return qty; if (d.uncertain) return '0'; return M.max('0', M.sub(qty, d.consumed)); };
   function observeBook(ev) {
-    const { symbol, snapshot, changes } = ev;
+    const { symbol, snapshot, changes } = ev; if (snapshot?.synced) lastBook.set(symbol, snapshot); else lastBook.delete(symbol);
     if (snapshot.kind === 'SNAPSHOT') { const first = !firstSnapshotSeen.has(symbol); firstSnapshotSeen.add(symbol); if (!first) { for (const [k, d] of depletion) if (k.startsWith(`${symbol}|`) && !M.isZero(d.consumed) && !d.uncertain) { d.uncertain = true; counters.uncertainLevels += 1; } } for (const side of ['bids', 'asks']) for (const [price] of snapshot[side]) { const d = depletion.get(key(symbol, side, price)); if (d) d.lastObserved = snapshot.receiptTs; } return; }
     // PUBLISH-FIX-17 (independent review F4): the depletion map holds ONLY levels that carry safety information — a
     // consumed quantity or a continuity-loss mark. A level nothing was ever taken from answers `available` identically
@@ -89,8 +91,22 @@ export function createPaperAdapter({ accountId, clock, feed = null, fee, specOf,
   }
   function onTrade(ev) { const now = ev.trade.receiptTs; for (const st of stops.values()) { if (st.state !== 'ACTIVE' || st.pair !== ev.symbol) continue; if (M.lte(ev.trade.price, st.trigger)) { st.state = 'TRIGGERED'; st.triggeredTs = now; counters.stopsTriggered += 1; emit('PROTECTION_STATE', { positionId: st.positionId, orderId: st.journalOrderId ?? null, state: 'TRIGGERED', nativeOrderId: st.stopOrderId, trigger: st.trigger, qty: st.qty, sourceTs: ev.trade.eventTs, receiptTs: now, reason: `last ${ev.trade.price} <= trigger ${st.trigger}` }, now); const oid = st.journalOrderId ?? st.stopOrderId; pending.set(oid, { kind: 'STOP_FILL', stopOrderId: st.stopOrderId, intent: { orderId: oid, positionId: st.positionId, pair: st.pair, side: 'sell', qty: st.qty, orderType: 'market', limitPrice: null }, spec: st.spec, arrivalTs: now + arrivalLatency(PAPER_DEFAULTS.exitLatencyMs), submittedTs: now, nativeOrderId: st.stopOrderId, ordRefId: st.ordRefId, resolved: false }); } } }
   function onBook(ev) { observeBook(ev); const snap = ev.snapshot; if (!snap.synced) return; for (const o of [...pending.values()]) { if (o.resolved || o.intent.pair !== ev.symbol) continue; if (snap.receiptTs < o.arrivalTs) continue; if (snap.receiptTs > o.arrivalTs + maxObservationWaitMs) continue; settle(o, snap, snap.receiptTs); } }
-  function onTick(now = clock()) { for (const o of [...pending.values()]) { if (o.resolved) continue; if (now > o.arrivalTs + maxObservationWaitMs) { o.resolved = true; pending.delete(o.intent.orderId); counters.unfilledCoverageUnknown += 1; emit('ORDER_STATE', { orderId: o.intent.orderId, state: 'EXPIRED', nativeOrderId: o.nativeOrderId, nativeCumQty: '0', reason: 'UNFILLED_COVERAGE_UNKNOWN: no accepted book within the bounded post-arrival window (unscorable)', sourceTs: null, receiptTs: now }, now); if (o.kind === 'STOP_FILL') { const st = stops.get(o.stopOrderId); if (st) st.state = 'UNFILLED_COVERAGE_UNKNOWN'; } } } }
-  if (feed) feed.subscribe((ev) => { if (ev.kind === 'BOOK') onBook(ev); else if (ev.kind === 'TRADE') onTrade(ev); else if (ev.kind === 'EPOCH') { for (const d of depletion.values()) if (!M.isZero(d.consumed) && !d.uncertain) { d.uncertain = true; counters.uncertainLevels += 1; } } });
+  // PUBLISH-FIX-125 (2026-09-24): a quiet book is the book. GNOT/USD, deployment 35224048, 22:03Z: the entry was sent, and no book
+  // CHANGE arrived in the second after the simulated arrival (a thin pair; Kraken publishes a book message only when a level changes)
+  // -> UNFILLED_COVERAGE_UNKNOWN, unscorable. On a feed that stayed connected, synced and heartbeating in the same epoch, "no message"
+  // means "no change": the last accepted book is the book at arrival. It stands only when it was received within the system's stale
+  // line (10 s — execution/feed.js criticalAfterMs; the doctrine's "a stale feed (> 10 s) => NO TRADE") before arrival, the connection
+  // heartbeat is fresh (<= 5 s, the feed's impaired line) and nothing arrived after arrival; otherwise the unscorable law is unchanged.
+  const QUIET_BOOK_HORIZON_MS = 10_000; const HEARTBEAT_FRESH_MS = 5_000;
+  function standingBook(o, now) {
+    const snap = lastBook.get(o.intent.pair); if (!snap || !snap.synced || snap.receiptTs > o.arrivalTs || o.arrivalTs - snap.receiptTs > QUIET_BOOK_HORIZON_MS) return null;
+    let h = null; try { h = feed?.health?.(o.intent.pair, now) ?? null; } catch { h = null; }
+    if (!h || !h.connected || !h.synced || h.epoch !== snap.feedEpoch) return null;
+    const live = (h.heartbeatAgeMs !== null && h.heartbeatAgeMs !== undefined && h.heartbeatAgeMs <= HEARTBEAT_FRESH_MS) || h.tradeCoverage?.continuous === true;
+    return live ? snap : null;
+  }
+  function onTick(now = clock()) { for (const o of [...pending.values()]) { if (o.resolved) continue; if (now > o.arrivalTs + maxObservationWaitMs) { const standing = standingBook(o, now); if (standing) { counters.quietBookSettles = (counters.quietBookSettles ?? 0) + 1; settle(o, standing, now); if (o.sampled) o.sampled.quietBookStanding = true; continue; } o.resolved = true; pending.delete(o.intent.orderId); counters.unfilledCoverageUnknown += 1; emit('ORDER_STATE', { orderId: o.intent.orderId, state: 'EXPIRED', nativeOrderId: o.nativeOrderId, nativeCumQty: '0', reason: 'UNFILLED_COVERAGE_UNKNOWN: no accepted book within the bounded post-arrival window (unscorable)', sourceTs: null, receiptTs: now }, now); if (o.kind === 'STOP_FILL') { const st = stops.get(o.stopOrderId); if (st) st.state = 'UNFILLED_COVERAGE_UNKNOWN'; } } } }
+  if (feed) feed.subscribe((ev) => { if (ev.kind === 'BOOK') onBook(ev); else if (ev.kind === 'TRADE') onTrade(ev); else if (ev.kind === 'EPOCH') { lastBook.clear(); for (const d of depletion.values()) if (!M.isZero(d.consumed) && !d.uncertain) { d.uncertain = true; counters.uncertainLevels += 1; } } });
   const adapter = {
     kind: 'PAPER', accountId, limitation: PAPER_LIMITATION,
     subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn); },

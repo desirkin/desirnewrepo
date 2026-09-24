@@ -43,6 +43,11 @@ export function createDispatcher({ accountId, journal, writer, adapter, clock, f
   // own; measured from when the ATTEMPT became durable, that time is ours, not the market's. Price staleness stays with QUOTE_NOT_FRESH
   // (a book at most 1 s old at that check) and the IOC limit; every other clause is unchanged.
   const intentDurableAt = new Map();
+  // PUBLISH-FIX-125, the same law for the book at send: the decision itself required a book at most 1 s old (BOOK_FRESH at D). After
+  // D, a pair whose book has not CHANGED for a second or two is quiet, not stale — on a connected, synced feed Kraken would have sent
+  // any change. QUOTE_NOT_FRESH now refuses only a book the feed calls critical (no message for 10 s — the doctrine's stale line) or a
+  // lost / unsynced book.
+  // Thin runners go quiet between prints; the old 1 s law refused them for our own commit time.
   async function pumpCommits() {
     if (pumpingCommits) return; pumpingCommits = true;
     try { for (;;) { const next = lanes.priority.shift() ?? lanes.ordinary.shift(); if (!next) break; try { next.resolve(await next.run()); } catch (err) { next.reject(err); } } }
@@ -155,7 +160,7 @@ export function createDispatcher({ accountId, journal, writer, adapter, clock, f
     const stored = state.orders[orderId]; const durableTs = intentDurableAt.get(orderId);
     const window = stored && Number.isSafeInteger(stored.deadlineTs) && Number.isSafeInteger(stored.createdTs) ? (stored.deadlineRebasedFrom ?? stored.deadlineTs) - stored.createdTs : null;
     const o = stored && stored.state === (phase === 'BEFORE_SEND' ? 'DISPATCH_UNCERTAIN' : 'UNSENT') && Number.isSafeInteger(durableTs) && window !== null && window > 0 && durableTs + window > stored.deadlineTs ? { ...stored, deadlineTs: durableTs + window } : stored; const spec = specOf ? (specOf(o?.pair ?? '') ?? null) : UNCHECKED; const fee = feeOf ? (feeOf(o?.pair ?? '') ?? null) : UNCHECKED; const quote = feed && o ? feed.health(o.pair, now()) : null;
-    const result = entryAuthority(state, o, { controls: typeof controls === 'function' ? controls() : null, nowTs: now(), runMode: ctx.runMode, clockTrusted: ctx.clockTrusted(), writerHeld: writerHeld() && !writerLost && !closed, binding: ctx.binding, spec, fee, quote: quote ? { usable: quote.usable } : null, expectedRevision, revision, phase });
+    const result = entryAuthority(state, o, { controls: typeof controls === 'function' ? controls() : null, nowTs: now(), runMode: ctx.runMode, clockTrusted: ctx.clockTrusted(), writerHeld: writerHeld() && !writerLost && !closed, binding: ctx.binding, spec, fee, quote: quote ? { usable: quote.usable || (quote.connected === true && quote.synced === true && quote.critical === false) } : null, expectedRevision, revision, phase });
     const persistence = permissionIncreaseGate();
     return persistence.ok ? result : { ...result, ok: false, reasons: [...new Set([...(result.reasons ?? []), persistence.reason])] };
   }
