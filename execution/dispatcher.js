@@ -34,6 +34,15 @@ export function createDispatcher({ accountId, journal, writer, adapter, clock, f
   // intent, the dispatch attempt, an adapter fill, a Watch exit) runs ahead of every WAITING ordinary commit (refusal records,
   // valuations, the hypothesis locks of a crossing storm); order inside each lane is unchanged and a running commit is never interrupted.
   const lanes = { priority: [], ordinary: [] }; let pumpingCommits = false; let chainSettled = Promise.resolve();
+  // PUBLISH-FIX-125 (2026-09-24): when each entry intent became durable here (orderId -> ts), so the pre-attempt deadline counts the
+  // market's time, not the journal's own. XCN/USD, deployment 35224048, 20:42Z: the decision's 3 000 ms window was spent on the
+  // decision snapshot and the one-transaction intent commit to the production database (intent durable at +1.46 s, queue to +3.08 s);
+  // the dispatcher refused it before sending (INTENT_DEADLINE_PASSED, 80 ms over) while the ask sat at or under the limit for 15 s.
+  // The window is the intent's own (deadlineTs - createdTs) — the same restart PUBLISH-FIX-83 item 2 applies at the durable attempt.
+  // The same holds at the last check before the send: the attempt's commit can wait behind a running ordinary commit and then take its
+  // own; measured from when the ATTEMPT became durable, that time is ours, not the market's. Price staleness stays with QUOTE_NOT_FRESH
+  // (a book at most 1 s old at that check) and the IOC limit; every other clause is unchanged.
+  const intentDurableAt = new Map();
   async function pumpCommits() {
     if (pumpingCommits) return; pumpingCommits = true;
     try { for (;;) { const next = lanes.priority.shift() ?? lanes.ordinary.shift(); if (!next) break; try { next.resolve(await next.run()); } catch (err) { next.reject(err); } } }
@@ -47,7 +56,7 @@ export function createDispatcher({ accountId, journal, writer, adapter, clock, f
       if (revision === null) await load();
       for (let attempt = 0; attempt < 2; attempt += 1) {
         if (recheck && !recheck(state)) throw new JournalError('RECHECK_FAILED', 'account state changed since the precomputation');
-        try { const r = await journal.append(accountId, { expectedRevision: revision, writerEpoch: writer.epoch, writer, events: list }); revision = r.revision; state = r.state; counters.commits += 1; latency.receiptToJournal.push(now() - t0); if (latency.receiptToJournal.length > 2048) latency.receiptToJournal.shift(); for (const fn of commitListeners) { try { fn(state, list); } catch (err) { log(`commit listener error: ${err?.message ?? err}`); } } return r; }
+        try { const r = await journal.append(accountId, { expectedRevision: revision, writerEpoch: writer.epoch, writer, events: list }); revision = r.revision; state = r.state; counters.commits += 1; const durableTs = now(); for (const e of list) if ((e.type === 'ORDER_INTENT' || e.type === 'DISPATCH_ATTEMPTED') && e.payload?.orderId) { intentDurableAt.set(e.payload.orderId, durableTs); if (intentDurableAt.size > 256) intentDurableAt.delete(intentDurableAt.keys().next().value); } latency.receiptToJournal.push(now() - t0); if (latency.receiptToJournal.length > 2048) latency.receiptToJournal.shift(); for (const fn of commitListeners) { try { fn(state, list); } catch (err) { log(`commit listener error: ${err?.message ?? err}`); } } return r; }
         catch (err) { if (err.code === 'REVISION_CONFLICT' && retryOnConflict && attempt === 0) { counters.revisionRetries += 1; await load(); continue; } if (err.code === 'EPOCH_FENCED' || err.code === 'LOCK_LOST') loseWriter(err.code); throw err; }
       }
       throw new JournalError('REVISION_CONFLICT', 'conflict persisted after reload');
@@ -143,7 +152,9 @@ export function createDispatcher({ accountId, journal, writer, adapter, clock, f
     catch { return { ok: false, reason: PERSISTENCE_PERMISSION_REASON }; }
   }
   function authorityOf(orderId, { expectedRevision = null, phase = 'BEFORE_ATTEMPT' } = {}) {
-    const o = state.orders[orderId]; const spec = specOf ? (specOf(o?.pair ?? '') ?? null) : UNCHECKED; const fee = feeOf ? (feeOf(o?.pair ?? '') ?? null) : UNCHECKED; const quote = feed && o ? feed.health(o.pair, now()) : null;
+    const stored = state.orders[orderId]; const durableTs = intentDurableAt.get(orderId);
+    const window = stored && Number.isSafeInteger(stored.deadlineTs) && Number.isSafeInteger(stored.createdTs) ? (stored.deadlineRebasedFrom ?? stored.deadlineTs) - stored.createdTs : null;
+    const o = stored && stored.state === (phase === 'BEFORE_SEND' ? 'DISPATCH_UNCERTAIN' : 'UNSENT') && Number.isSafeInteger(durableTs) && window !== null && window > 0 && durableTs + window > stored.deadlineTs ? { ...stored, deadlineTs: durableTs + window } : stored; const spec = specOf ? (specOf(o?.pair ?? '') ?? null) : UNCHECKED; const fee = feeOf ? (feeOf(o?.pair ?? '') ?? null) : UNCHECKED; const quote = feed && o ? feed.health(o.pair, now()) : null;
     const result = entryAuthority(state, o, { controls: typeof controls === 'function' ? controls() : null, nowTs: now(), runMode: ctx.runMode, clockTrusted: ctx.clockTrusted(), writerHeld: writerHeld() && !writerLost && !closed, binding: ctx.binding, spec, fee, quote: quote ? { usable: quote.usable } : null, expectedRevision, revision, phase });
     const persistence = permissionIncreaseGate();
     return persistence.ok ? result : { ...result, ok: false, reasons: [...new Set([...(result.reasons ?? []), persistence.reason])] };

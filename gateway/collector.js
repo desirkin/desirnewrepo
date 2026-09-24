@@ -280,7 +280,12 @@ export function startGateway({ log = console.log, config = loadConfig(), fetchIm
     const doors = buildDoorMatrix(coins, krakenComponents, events, prevMatrix);
     // Ticket P: the Kraken latency signal for paper fills — the last measured status round-trip and the worst live
     // Kraken door. A failed fetch this cycle (no rttMs) reads as DEGRADED so an unreachable venue widens the delay.
-    const krakenRttMs = sourceRtt.has('kraken') ? sourceRtt.get('kraken') : null;
+    // PUBLISH-FIX-125 (2026-09-24): the round-trip is the one to Kraken's own API host (api.kraken.com SystemStatus), the host an
+    // order goes to — not the status web page (status.kraken.com, a third-party page host). Live, the page-load time (doubled by any
+    // open incident, clamped at 5 s) was what the paper venue waited before sampling a book: DASH/USD, deployment 35224048, 14:54Z —
+    // the book was sampled 8.95 s after the decision and the IOC found nothing at its limit. The status page is used only when the
+    // API host was not measured this cycle. The door (what the incidents say) is unchanged.
+    const krakenRttMs = sourceRtt.has('krakenSystem') ? sourceRtt.get('krakenSystem') : sourceRtt.has('kraken') ? sourceRtt.get('kraken') : null;
     const krakenEventDoor = worstDoor(events.filter((e) => e.venue === 'kraken').map((e) => e.door));
     const krakenDoor = cfg.sources?.kraken && krakenRttMs === null ? DOOR.DEGRADED : krakenEventDoor;
     const latency = { kraken: { rttMs: krakenRttMs, door: krakenDoor, observedAt } };
