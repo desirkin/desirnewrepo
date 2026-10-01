@@ -1,0 +1,36 @@
+{
+  "enabled": true,
+  "note": "SOCRATES TRADER v3 (owner experiment 2026-09-30): the model trades the six strategies itself on its own $500 paper ledger. Mission 15-20% a day. THE CAGE: 1-hour windows; won -> faster looks; 1%+ under the line -> 1 h cage; two lost in a row end the run. TOOLS: resting LIMIT_BUY at the 0.40% maker fee (fills only when the price trades through), half off at +4% (maker), auto-trail (+3% break-even, +6% trails 5%), tripwire (+2%/min, calm crowd, buyers), the album of today's real rockets and duds, his own notebook of lessons, the live tape's buyer share and depth, slower looks overnight and when the budget runs ahead. Off switch: enabled=false and republish.",
+  "model": "claude-sonnet-5",
+  "startingUsd": 500,
+  "dailyUsd": 15,
+  "durationHours": 48,
+  "windowHours": 1,
+  "pauseHours": 1,
+  "maxLostInARow": 2,
+  "lossPct": 1,
+  "lookLadderMs": [
+    180000,
+    120000,
+    90000,
+    60000
+  ],
+  "holdCheckEveryMs": 60000,
+  "minRoomPct": 4,
+  "trail": {
+    "breakEvenAtPct": 3,
+    "armAtPct": 6,
+    "pct": 5
+  },
+  "tripwire": {
+    "jumpPct": 2,
+    "maxTradesInMinute": 15,
+    "minUsd1h": 10000,
+    "cooldownMs": 600000,
+    "minGapMs": 45000,
+    "minBuyShare": 0.6
+  },
+  "makerFeeRate": 0.004,
+  "takeHalfAtPct": 4,
+  "limitTtlMs": 1800000
+}

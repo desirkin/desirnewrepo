@@ -65,8 +65,11 @@ SERPENT_STALL_WATCHDOG = "true"
 SERPENT_HEAP_SAMPLE = "false"
 # PUBLISH-FIX-14 (independent review F5): learning ON — LEARN-1 capture/maturation/pattern memory (LEARNING_ENABLED) and the
 # Judge's ranking-only learned contribution (SERPENT_LEARNING_RANKING; PAPER only; off switch = `cobra learning kill`).
-LEARNING_ENABLED = "true"
-SERPENT_LEARNING_RANKING = "true"
+# LEAN RUN 2026-09-30 (owner: attic everything the Socrates trader does not need for the two-day run): LEARN-1 and the ranking
+# contribution are the Judge's learners, not the trader's; OFF for the run (set both back to "true" to restore). The 2026-09-28 boot
+# (deployment 71fa9387) stalled CPU-bound on the main thread 30 s after "LEARN-1 active" and never reached TAPE LIVE.
+LEARNING_ENABLED = "false"
+SERPENT_LEARNING_RANKING = "false"
 
 [postMerge]
 path = "scripts/post-merge.sh"

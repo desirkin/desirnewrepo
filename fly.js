@@ -266,6 +266,17 @@ if (SERPENT_MODE === 'DATA_ONLY') {
     if (typeof moverStudyTimer?.unref === 'function') moverStudyTimer.unref();
     console.log('MOVER STUDY active (authority NONE): every >=10%/hour climb across the whole accepted catalog gets its hour-before / the move / hour-after written from closed candles, with control coins beside it; each becomes a graded DAILY_MOVER lesson');
   } catch (err) { console.error(`MOVER STUDY failed to start (dark; nothing else affected): ${String(err?.message ?? err).slice(0, 160)}`); moverStudy = null; }
+  // SOCRATES TRADER (owner experiment 2026-09-30, David and Cole: "give the six strategies to the AI ... no judge this time, just
+  // straight AI decisions ... it's only paper so it's an experiment"): the model trades from the volatility watch, the broad
+  // 1-minute candles and the collector's tickers on its OWN $500 paper ledger (<data>/socrates-trader). It never touches the Judge,
+  // the Watch, the execution journal or any order path. On only when config/socrates-trader.json says enabled.
+  let socratesTrader = null;
+  try {
+    const { readTraderConfig, createSocratesTrader } = await import('./experiment/socrates-trader.js');
+    const traderCfg = readTraderConfig(path.join(process.cwd(), 'config', 'socrates-trader.json'));
+    if (traderCfg?.enabled === true && broadSeriesShared && volatilityWatch) { socratesTrader = createSocratesTrader({ dataDir: dataDir(), seriesSource: broadSeriesShared, watch: volatilityWatch, config: traderCfg, env: process.env, log: console.log, tapeSnapshot: readCurrentFeatureSnapshot }); socratesTrader.start(); }
+    else console.log(`SOCRATES TRADER off (${traderCfg?.enabled === true ? 'the watch or the candle source is not running' : 'config/socrates-trader.json not enabled'})`);
+  } catch (err) { console.error(`SOCRATES TRADER failed to start (dark; nothing else affected): ${String(err?.message ?? err).slice(0, 160)}`); socratesTrader = null; }
   await serpentRuntime.startAdditions({ catalogAccessor: wideEye ? { snapshot: () => wideEye.catalogSnapshot() } : null, onBroadRecord: moverStudy ? moverStudy.onRecord : null });
   // RUMOR-2A dark multi-source rumor ear — no-ops (zero network, zero timers)
   // unless RUMOR2_ENABLED=true. Observation and memory ONLY: zero attention,
@@ -691,6 +702,7 @@ if (SERPENT_MODE === 'DATA_ONLY') {
     if (scoutTimer) { try { clearInterval(scoutTimer); } catch { /* timer already cleared */ } scoutTimer = null; }
     // PUBLISH-FIX-63: the day's mover board is snapshotted before the process goes, so a republish never forgets it
     if (moverStudyTimer) { try { clearInterval(moverStudyTimer); } catch { /* timer already cleared */ } moverStudyTimer = null; }
+    if (socratesTrader) { try { socratesTrader.stop(); } catch { /* state saved on every tick */ } socratesTrader = null; }
     if (volatilityTimer) { try { clearInterval(volatilityTimer); } catch { /* timer already cleared */ } volatilityTimer = null; }
     if (moveClockTimer) { try { clearInterval(moveClockTimer); } catch { /* timer already cleared */ } moveClockTimer = null; }
     if (gateStudyTimer) { try { clearInterval(gateStudyTimer); } catch { /* timer already cleared */ } gateStudyTimer = null; }

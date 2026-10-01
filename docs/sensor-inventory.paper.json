@@ -155,7 +155,7 @@
    "replay": "none",
    "decisionAuthority": "NONE",
    "paperAuthority": "NONE",
-   "paperDesiredState": "ON",
+   "paperDesiredState": "OFF",
    "blockerPolicy": "DEGRADE",
    "readinessBlocker": null,
    "smokeEvidence": "attic/doctrine/SOCIAL.md §36"
@@ -270,7 +270,7 @@
    "replay": "aggregate checkpoint only",
    "decisionAuthority": "NOMINATE_WARN_ONLY",
    "paperAuthority": "NOMINATE_WARN_ONLY",
-   "paperDesiredState": "ON",
+   "paperDesiredState": "OFF",
    "blockerPolicy": "DEGRADE",
    "readinessBlocker": null,
    "smokeEvidence": "doctrine/RUMINT.md (StockTwits aggregate ear; RUMINT-R1); 2026-09-12 local read through rumint/stocktwits.js fetchSymbolPage(BTC.X): ok, 30 messages, cursor present"
