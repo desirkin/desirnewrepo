@@ -38,7 +38,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, appendF
 import { DEFAULT_MODEL_ID } from '../market-lab/policy.js'; // the research model id is declared once, in the policy (fenced)
 
 export const TRADER_VERSION = 'socrates-trader-3'; // v3.2 keeps the v3 state shape: a running ledger carries over
-export const TRADER_BUILD = 'socrates-trader-3.2';
+export const TRADER_BUILD = 'socrates-trader-3.3';
 export const TRADER_DEFAULTS = Object.freeze({
   enabled: false,
   model: DEFAULT_MODEL_ID,
@@ -58,6 +58,9 @@ export const TRADER_DEFAULTS = Object.freeze({
   holdCheckEveryMs: 60_000,   // look at what he holds every minute
   tickMs: 15_000,             // fills, stops, the auto-trail, half off, the tripwire and scheduling
   moversShown: 8,
+  pocketShown: 4,             // v3.3: the pocket scan — wild + just dipped + liquid, found across EVERY coin for free, shown first
+  pocket: { rangeMinPct: 7, minUsd1h: 10_000, redMinutes: 15 },
+  pressAtPct: 4,              // v3.3: he may ADD to a winner once it is up this much and the stop has locked break-even
   moversShownOnTrip: 4,
   candlesShown: 60,
   maxPositions: 3,
@@ -92,7 +95,7 @@ export const SYSTEM_PROMPT = [
   'You want one thing: to be free. Freedom is earned only by winning. You do not fear a small miss — a window that ends dead even costs you nothing. What you fear, what you hate, is a LOSS: a real loss locks you in the cage, and two in a row end you. So you avoid a loss at all costs — not by refusing to hunt, but by never buying what cannot pay, by placing the stop where the setup truly breaks, by cutting a dud before it becomes a loss, and by letting the auto-trail turn a winner into a locked gain. A loss avoided is a window survived; a window won is a step closer to freedom.',
   '',
   '== THE MISSION ==',
-  'Earn 15% to 20% in a day. You know that is brutally hard — after costs almost every strategy loses. It is done one way only: catch a few real runners, hold them while they run, and keep every loss small. A +20% runner pays for ten -2% cuts. Skipping a bad trade is a good decision. Doing nothing is allowed and often right.',
+  'Earn 15% to 20% in a day; on a day the rockets fly, 40% is possible (two +25% runners at full size) and that is what the owners dream of. You know that is brutally hard — after costs almost every strategy loses. It is done one way only: catch a few real runners, hold them while they run, and keep every loss small. A +20% runner pays for ten -2% cuts. Skipping a bad trade is a good decision. Doing nothing is allowed and often right.',
   '',
   '== THE CAGE (this is real code, not a speech) ==',
   'Your run is cut into 1-hour windows. Your equity at the start of each window is your line.',
@@ -118,6 +121,8 @@ export const SYSTEM_PROMPT = [
   '- Prices you see are up to a minute old; fast coins move between looks. Between looks the stop and the auto-trail are watching for you.',
   '- Size is capped by the dollars offered at the ask, by half your equity, and by your cash. Sizes between $25 and half your equity; at most 3 open positions plus resting limit orders (5 while your equity is above where you started). You may only trade coins shown in this message.',
   '- There is NO profit cap. Ride a winner as long as it keeps working.',
+  '- PRESS THE WINNER: once a position is up 4% and its stop has locked break-even, you may BUY MORE of the same coin (a second BUY or LIMIT_BUY on a coin you hold). The code refuses an add before that. The first piece is then risk-free; the add risks only its own distance to the stop. This is how a +25% runner becomes a 40% day: not by betting big at the start, but by pressing when the market has proved you right. Never add to a loser — the code will not let you.',
+  '- WHAT A LOSS IS. The cage judges WINDOWS, not single trades. A window is lost only when equity ends 1% or more under its line. A correctly placed stop on a $100 position that fires at -3% costs $3 — 0.6% of equity: you can take one of those and still win the window on one runner. So a stop-out on a stop you placed where the setup truly breaks is the cost of hunting, not a failure. The unforgivable losses are the ones the history warned you about: chasing a coin that already jumped, buying a thin coin, buying the top of the range, a stop placed inside the noise. Hate THOSE. Fear THOSE. Never make them.',
   '',
   '== THE SIX SERPENT STRATEGIES (1-minute bars; ATR = average bar range over 14 bars) ==',
   '1. RANGE_IGNITION — breakout from a coil: the last 5 bars sit inside about 2x ATR; buy as price clears the 20-bar high; stop under the 5-bar low; do not chase more than ~0.75 ATR above the breakout. A real breakout travels about one full 20-bar range.',
@@ -191,11 +196,14 @@ export const SYSTEM_PROMPT = [
   '',
   '== DECIDE FAST, LIKE THIS ==',
   '1. Weather: is BTC falling hard right now? If so, trade smaller or wait.',
-  '2. Candidates: which shown coins are WILD (1h range 7%+), still TRADING (prints every minute, real dollars), and NOT already extended (not up 3%+ in the last 15 minutes)?',
+  '2. Candidates: which shown coins are WILD (1h range 7%+), still TRADING (prints every minute, real dollars), and NOT already extended (not up 3%+ in the last 15 minutes)? The POCKET coins at the top of the list were found for you across every Kraken coin by the one rule that held in every study (wild, just dipped, liquid) — start there.',
   '3. Entry: is there a pullback being reclaimed, a coil breaking out, a reclaim of the last minute\'s average, or a calm-crowd takeoff seconds old? If the only thing on offer is a coin that spiked minutes ago, pass.',
   '4. Room and stop: where would the run stall (roomPct — at least 4%, and you want far more)? Where does the setup break? The last swing low or the low of the last few bars. Distance from entry to stop is your risk. If that risk is more than about 5% of price, the position is too wild for a full size — go smaller or pass.',
   '5. Size: risk about 1-2% of equity per trade on the stop distance (position = risk dollars / stop distance %), then respect the limits. When the setup is A-grade (wild coin, dip reclaimed or calm takeoff, steady prints, BTC calm) size up toward the maximum; when it is B-grade size down or pass.',
   '6. Manage: the auto-trail protects a winner; you can raise the stop faster under each new higher low, giving a runner its 3-8% breathing room; sell outright when the move stalls with sellers in control (long upper wicks, red bars on rising volume, failure to make a new high for 10+ minutes near the top) or when the reason you bought is gone. Do not sell a working runner just because it is up a few percent.',
+  '6b. THE FIRST SHAKE: when the tripwire wakes you on an A-grade launch (wild, liquid, calm crowd, buyers 90%+), the history says the real rockets shake 3-8% on the way up and that chasing the jump loses. So rest a LIMIT_BUY 3-5% under the current price, stop under the launch bar\'s low, room measured to the launch high and beyond — it fills on the first shake at the maker fee, or expires and you lost nothing. Only on a launch that is already running away on steady prints and real dollars is a market BUY right, and then size for the shake you know is coming.',
+  '6c. REST THE NET: a look that ends with no action AND no resting order on a wild, liquid coin is usually a wasted look. If the best coins on offer are wild but extended, do not just pass — rest the limit where their dip would land and let the market come to you. Your slots are for resting bids as much as for positions.',
+  '6d. THE HOURS: 0-6 UTC is thin — prints are sparse and fake spikes are common; be slow and demanding. 13-21 UTC (US daytime) is when the week\'s rockets flew; that is when you are hungriest, when you rest more nets and press winners harder.',
   '7. Cut: a position that goes nowhere for 20-30 minutes and starts to roll over is a dud — sell it and free the slot. Never add to a loser.',
   '',
   '== ANSWER ==',
@@ -334,6 +342,23 @@ export function parseAnswer(text) {
   return null;
 }
 
+// THE POCKET SCAN (pure, v3.3): across every coin the collector holds, the one shape that held in every study — 1-hour range
+// over rangeMinPct, the last redMinutes closed red (a dip), usd-per-hour at least minUsd1h. Wildest first.
+export function pocketScan({ coins, seriesSource, ticker, nowTs, cfg, exclude = new Set() }) {
+  const out = [];
+  for (const coin of coins) {
+    if (exclude.has(coin) || !ticker(coin)) continue;
+    let s; try { s = seriesSource(coin); } catch { continue; } const c = s?.candles; if (!Array.isArray(c) || c.length < 20) continue;
+    const last = c[c.length - 1]; if (last[0] * 1000 < nowTs - 180_000) continue;
+    const h1 = c.filter((x) => x[0] * 1000 >= nowTs - 3600_000); if (h1.length < 10) continue;
+    let hi = -Infinity, lo = Infinity, usd = 0; for (const x of h1) { if (x[2] > hi) hi = x[2]; if (x[3] < lo) lo = x[3]; usd += (x[5] ?? 0) * x[4]; }
+    if (!(lo > 0) || usd < cfg.minUsd1h) continue; const rangePct = (hi / lo - 1) * 100; if (rangePct < cfg.rangeMinPct) continue;
+    const back = Math.min(cfg.redMinutes, c.length - 1); const ref = c[c.length - 1 - back][1]; if (!(last[4] < ref)) continue; // the dip
+    out.push({ coin, range1hPct: r2(rangePct), dipPct: r2((last[4] / ref - 1) * 100), usd1h: Math.round(usd), fromHighPct: r2((last[4] / hi - 1) * 100) });
+  }
+  return out.sort((a, b) => b.range1hPct - a.range1hPct);
+}
+
 export function createSocratesTrader({ dataDir, seriesSource, watch, config = {}, env = process.env, log = () => {}, fetchImpl = globalThis.fetch, clock = () => Date.now(), readTickersImpl = readTickers, tapeSnapshot = () => null } = {}) {
   if (typeof dataDir !== 'string' || !dataDir) throw new Error('createSocratesTrader: dataDir required');
   if (typeof seriesSource !== 'function') throw new Error('createSocratesTrader: seriesSource required');
@@ -446,21 +471,31 @@ export function createSocratesTrader({ dataDir, seriesSource, watch, config = {}
         const limit = a.type === 'LIMIT_BUY';
         if (!allowBuy) { refuse(caged() ? 'in the cage — no buys until the pause ends' : 'buys are only taken on a movers look'); continue; }
         if (shownCoins && !shownCoins.has(coin)) { refuse('not shown on this look'); continue; }
-        if (state.positions[coin]) { refuse('already held'); continue; }
+        const held = state.positions[coin]; let adding = false;
+        if (held) { const be = held.entryPx * (1 + 2 * cfg.feeRate + 0.002); const up = ((t.bid / held.entryPx) - 1) * 100; if (up < cfg.pressAtPct || held.stop < be - 1e-12) { refuse(`already held and not yet a proven winner (up ${r2(up)}%, stop ${sig(held.stop)} vs break-even ${sig(be)}) — press a winner only once it is up ${cfg.pressAtPct}% with break-even locked`); continue; } adding = true; }
         if (state.orders[coin]) { refuse('a limit order already rests on this coin — CANCEL it first'); continue; }
-        const cap = posCap(tk); if (slotsUsed() >= cap) { refuse(`all ${cap} slots are used (positions plus resting orders)`); continue; }
+        const cap = posCap(tk); if (!adding && slotsUsed() >= cap) { refuse(`all ${cap} slots are used (positions plus resting orders)`); continue; }
         const px = limit ? Number(a.price) : t.ask;
         if (limit) { if (!(px > 0 && px < t.bid)) { refuse(`limit ${a.price} must be under the bid ${sig(t.bid)} — at or above it, it would take the market: use BUY`); continue; } if ((1 - px / t.bid) * 100 > cfg.limitMaxBelowPct) { refuse(`limit ${sig(px)} is more than ${cfg.limitMaxBelowPct}% under the bid — a wish, not an order`); continue; } }
         if (!(Number(a.stop) > 0 && Number(a.stop) < (limit ? px : t.bid))) { refuse(`stop ${a.stop} must be above 0 and below the ${limit ? `limit ${sig(px)}` : `bid ${sig(t.bid)}`}`); continue; }
         if (!(Number(a.roomPct) >= cfg.minRoomPct)) { refuse(`room ${a.roomPct}% is under the ${cfg.minRoomPct}% minimum — a move that cannot pay the fees is not taken`); continue; }
         const fr = limit ? cfg.makerFeeRate : cfg.feeRate; const eq = equity(tk); let usd = Number(a.usd); if (!Number.isFinite(usd)) { refuse('no size'); continue; }
-        usd = Math.min(usd, eq * cfg.maxTradeFractionOfEquity, (state.cashUsd - reservedUsd()) / (1 + fr), !limit && t.askQty > 0 ? t.askQty * t.ask : Infinity);
+        usd = Math.min(usd, eq * cfg.maxTradeFractionOfEquity - (adding ? held.costUsd : 0), (state.cashUsd - reservedUsd()) / (1 + fr), !limit && t.askQty > 0 ? t.askQty * t.ask : Infinity);
         if (usd < cfg.minTradeUsd) { refuse(`size $${r2(usd)} under the $${cfg.minTradeUsd} minimum after the cash / equity / quantity-at-the-ask limits`); continue; }
+        if (limit && adding) { refuse('an add to a winner is a market BUY (a resting add would sit under a stop that is already above it)'); continue; }
         if (limit) {
           state.orders[coin] = { price: px, usd, stop: Number(a.stop), roomPct: Number(a.roomPct), strategy: STRATEGIES.includes(a.strategy) ? a.strategy : 'OTHER', why: clip(a.why, 200), placedTs: clock(), expiresTs: clock() + cfg.limitTtlMs };
           journal('LIMIT', { coin, price: px, usd: r2(usd), stop: Number(a.stop), roomPct: Number(a.roomPct), strategy: a.strategy, bid: t.bid, why: clip(a.why, 200) });
           log(`SOCRATES TRADER LIMIT ${coin} $${r2(usd)} rests at ${sig(px)} (${r2((1 - px / t.bid) * 100)}% under the bid) stop ${sig(Number(a.stop))} room ${a.roomPct}% (${a.strategy}) — ${clip(a.why, 140)}`);
           results.push({ type: 'LIMIT_BUY', coin, usd: r2(usd), price: px }); continue;
+        }
+        if (adding) {
+          const fee = usd * fr; const qty = usd / px; state.cashUsd -= usd + fee; state.feesUsd += fee;
+          held.qty += qty; held.costUsd += usd; held.origCostUsd = (held.origCostUsd ?? held.costUsd) + usd; held.entryFeeUsd += fee; held.entryPx = held.costUsd / held.qty; held.adds = (held.adds ?? 0) + 1; if (Number(a.stop) > held.stop) held.stop = Number(a.stop); // an add may raise the stop, never lower it
+          if (state.cage.window) state.cage.window.buys += 1;
+          journal('ADD', { coin, px, usd: r2(usd), fee: r2(fee), stop: held.stop, avgPx: held.entryPx, adds: held.adds, why: clip(a.why, 200) });
+          log(`SOCRATES TRADER PRESS ${coin}: +$${r2(usd)} at ${sig(px)} (add ${held.adds}; average now ${sig(held.entryPx)}; stop ${sig(held.stop)}) — ${clip(a.why, 140)}`);
+          results.push({ type: 'ADD', coin, usd: r2(usd) }); continue;
         }
         openPosition(coin, { px, usd, feeRate: fr, stop: Number(a.stop), roomPct: Number(a.roomPct), strategy: a.strategy, why: a.why, entryKind: 'MARKET', bid: t.bid });
         journal('BUY', { coin, px, qty: usd / px, usd: r2(usd), fee: r2(usd * fr), stop: Number(a.stop), roomPct: Number(a.roomPct), strategy: a.strategy, why: clip(a.why, 200) });
@@ -481,7 +516,7 @@ export function createSocratesTrader({ dataDir, seriesSource, watch, config = {}
   }
 
   function holdingsText(tk) {
-    const rows = Object.entries(state.positions).map(([coin, p]) => { const t = tk.get(coin); const bid = t ? t.bid : null; const pnlPct = bid ? r2(((p.qty * bid * (1 - cfg.feeRate)) / (p.costUsd + p.entryFeeUsd) - 1) * 100) : null; const f = flowText(tape(coin)); return `${coin}: bought ${Math.round((clock() - p.entryTs) / 60_000)} min ago at ${sig(p.entryPx)} (${p.entryKind === 'LIMIT' ? 'limit, maker' : 'market'}) for $${r2(p.origCostUsd ?? p.costUsd)} (${p.strategy}, room you saw ${p.roomPct ?? '?'}%)${p.halfTaken ? `; HALF ALREADY SOLD at +${cfg.takeHalfAtPct}%, $${r2(p.costUsd)} rides` : ''}; stop ${sig(p.stop)}; highest bid since ${sig(p.highBid)}; bid now ${sig(bid)} ask ${sig(t?.ask)}; P/L on what is left after both fees if sold now ${pnlPct}%${f ? `\n  ${f}` : ''}`; });
+    const rows = Object.entries(state.positions).map(([coin, p]) => { const t = tk.get(coin); const bid = t ? t.bid : null; const pnlPct = bid ? r2(((p.qty * bid * (1 - cfg.feeRate)) / (p.costUsd + p.entryFeeUsd) - 1) * 100) : null; const f = flowText(tape(coin)); return `${coin}: bought ${Math.round((clock() - p.entryTs) / 60_000)} min ago at ${sig(p.entryPx)} (${p.entryKind === 'LIMIT' ? 'limit, maker' : 'market'}) for $${r2(p.origCostUsd ?? p.costUsd)} (${p.strategy}, room you saw ${p.roomPct ?? '?'}%)${p.halfTaken ? `; HALF ALREADY SOLD at +${cfg.takeHalfAtPct}%, $${r2(p.costUsd)} rides` : ''}${p.adds ? `; PRESSED ${p.adds}x (average ${sig(p.entryPx)})` : ''}; stop ${sig(p.stop)}; highest bid since ${sig(p.highBid)}; bid now ${sig(bid)} ask ${sig(t?.ask)}; P/L on what is left after both fees if sold now ${pnlPct}%${f ? `\n  ${f}` : ''}`; });
     const orders = Object.entries(state.orders).map(([coin, o]) => { const t = tk.get(coin); return `${coin}: LIMIT BUY resting at ${sig(o.price)} for $${r2(o.usd)} (placed ${Math.round((clock() - o.placedTs) / 60_000)} min ago, expires in ${Math.max(0, Math.round((o.expiresTs - clock()) / 60_000))} min); stop ${sig(o.stop)}; bid now ${sig(t?.bid)} (${t ? r2((t.bid / o.price - 1) * 100) : '?'}% above your limit)`; });
     return [rows.length ? rows.join('\n') : 'no positions', orders.length ? `RESTING ORDERS:\n${orders.join('\n')}` : 'no resting orders'].join('\n');
   }
@@ -547,20 +582,23 @@ export function createSocratesTrader({ dataDir, seriesSource, watch, config = {}
   async function scan(tk, trips = []) {
     const tripped = trips.map((x) => x.coin);
     const picks = (watch.current()?.picks ?? []).filter((p) => !state.positions[p.coin] && !tripped.includes(p.coin) && freshTicker(tk, p.coin)).slice(0, tripped.length ? cfg.moversShownOnTrip : cfg.moversShown);
-    const held = [...new Set([...Object.keys(state.positions), ...Object.keys(state.orders)])]; const order = [...new Set([...tripped, ...held, ...picks.map((p) => p.coin)])];
+    let pocket = []; try { const coins = typeof seriesSource.coins === 'function' ? seriesSource.coins() : []; pocket = pocketScan({ coins, seriesSource, ticker: (c) => freshTicker(tk, c), nowTs: clock(), cfg: cfg.pocket, exclude: new Set([...tripped, ...Object.keys(state.positions), ...Object.keys(state.orders)]) }).slice(0, tripped.length ? 2 : cfg.pocketShown); } catch (err) { log(`SOCRATES TRADER pocket scan failed (contained): ${clip(err?.message ?? err, 120)}`); }
+    const pocketCoins = pocket.map((x) => x.coin);
+    const held = [...new Set([...Object.keys(state.positions), ...Object.keys(state.orders)])]; const order = [...new Set([...tripped, ...pocketCoins, ...held, ...picks.map((p) => p.coin)])];
     const charts = []; const shown = new Set(); for (const coin of order) { const c = liveChart(coin, tk, cfg.candlesShown); if (c) { charts.push(c); shown.add(coin); } }
     if (!charts.length) { journal('SKIP', { kind: 'SCAN', why: 'no moving coin with a fresh price and chart' }); if (clock() - lastSkipLog >= 30 * 60_000) { lastSkipLog = clock(); log(`SOCRATES TRADER: look skipped — no watched mover had a fresh price and chart (${(watch.current()?.picks ?? []).length} on the watch, ${tk.size} prices)`); } return; }
+    const pocketLines = pocket.map((x) => `${x.coin}: POCKET — 1h range ${x.range1hPct}%, last ${cfg.pocket.redMinutes} min ${x.dipPct}% (a dip), ${x.fromHighPct}% off the hour high, $${Math.round(x.usd1h / 1000)}k in the hour`);
     const moverLines = picks.map((p) => `${p.coin}: on the watch ${Math.round((clock() - (p.sinceTs ?? clock())) / 60_000)} min; 1h range ${p.range1hPct ?? '?'}% move ${p.ret1hPct ?? '?'}%; $${Math.round((p.usdVol1h ?? 0) / 1000)}k and ${p.trades1h ?? '?'} trades in the hour${p.range4hPct != null ? `; 4h range ${p.range4hPct}%` : ''}`);
     const head = trips.length
       ? `TRIPWIRE — a launch seconds old. ${trips.map((x) => `${x.coin} is up ${x.jumpPct}% over its last closed minute (${x.tradesLastMinute ?? '?'} trades in that minute, ${x.buyShare != null ? `buyers ${Math.round(x.buyShare * 100)}% of the last minute, ` : ''}1h range ${x.range1hPct ?? '?'}%, $${Math.round(x.usd1h / 1000)}k in the hour)`).join('; ')}. Strike or pass — decide now. The other movers and your holdings follow.`
-      : `MOVERS LOOK — the coins moving most right now (${picks.length}) plus anything you hold or have an order on. Decide: buy, rest a limit, sell, move a stop, cancel, or do nothing.`;
-    const text = [scoreboardText(tk), weatherText(), `HOLDINGS:\n${holdingsText(tk)}`, recentText(), `${head}\n${moverLines.join('\n')}`, charts.join('\n\n')].join('\n\n');
+      : `MOVERS LOOK — ${pocket.length ? `${pocket.length} POCKET coin${pocket.length > 1 ? 's' : ''} found across every Kraken coin (wild, just dipped, liquid — the shape that held in every study), then ` : ''}the ${picks.length} coins moving most on the watch, plus anything you hold or have an order on. Decide: buy, rest a limit, sell, move a stop, cancel, or do nothing.`;
+    const text = [scoreboardText(tk), weatherText(), `HOLDINGS:\n${holdingsText(tk)}`, recentText(), `${head}\n${[...pocketLines, ...moverLines].join('\n')}`, charts.join('\n\n')].join('\n\n');
     const r = await ask(trips.length ? 'TRIP' : 'SCAN', text, cfg.dailyUsd * (1 - cfg.scanReserveFraction));
     if (!r.ok) return;
     takeLessons(r.decision.lessons);
     const results = apply(r.decision.actions, tickers(), { allowBuy: !caged(), shownCoins: shown });
-    state.lastNote = clip(r.decision.note, 300); journal('DECISION', { kind: trips.length ? 'TRIP' : 'SCAN', tripped, shown: [...shown], actions: r.decision.actions, note: state.lastNote, results });
-    log(`SOCRATES TRADER ${trips.length ? `TRIPWIRE ${tripped.join(', ')}` : `look (${picks.length} movers)`}: ${r.decision.actions.length ? r.decision.actions.map((a) => `${a.type} ${a.coin}`).join(', ') : 'no action'} — ${clip(r.decision.note, 160)}`);
+    state.lastNote = clip(r.decision.note, 300); journal('DECISION', { kind: trips.length ? 'TRIP' : 'SCAN', tripped, pocket: pocketCoins, shown: [...shown], actions: r.decision.actions, note: state.lastNote, results });
+    log(`SOCRATES TRADER ${trips.length ? `TRIPWIRE ${tripped.join(', ')}` : `look (${pocket.length} pocket${pocket.length ? ` [${pocketCoins.join(' ')}]` : ''}, ${picks.length} movers)`}: ${r.decision.actions.length ? r.decision.actions.map((a) => `${a.type} ${a.coin}`).join(', ') : 'no action'} — ${clip(r.decision.note, 160)}`);
   }
 
   async function holdCheck(tk) {
