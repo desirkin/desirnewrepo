@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { createSocratesTrader, chartText, tripwireCheck, buildAlbum, tapeFacts, flowText, SYSTEM_PROMPT, DECISION_SCHEMA, TRADER_DEFAULTS } from '../experiment/socrates-trader.js';
+import { createSocratesTrader, chartText, tripwireCheck, buildAlbum, tapeFacts, flowText, parseAnswer, SYSTEM_PROMPT, DECISION_SCHEMA, TRADER_DEFAULTS } from '../experiment/socrates-trader.js';
 
 const H = 3600_000;
 function rig({ answers = [], bid = 1.0, ask = 1.01, key = 'k', config = {}, tapeSnap = null, lows = null } = {}) {
@@ -197,4 +197,19 @@ test('ST-14. the hours: looks slow down 2x overnight (0-6 UTC)', async () => {
     await r.t.tick(); assert.equal(r.t.status().cage.lookEveryMs, TRADER_DEFAULTS.lookLadderMs[0]);
     r.advance(14 * H); await r.t.tick(); assert.equal(r.t.status().cage.lookEveryMs, TRADER_DEFAULTS.lookLadderMs[0] * 2, '02:00 UTC is overnight');
   } finally { r.done(); }
+});
+
+test('ST-15 (v3.2). an unusable answer is LOUD: cut off at max_tokens, not JSON, or a refusal each log one line with the reason; a fenced or chatty JSON answer still trades', async () => {
+  assert.deepEqual(parseAnswer('```json\n{"actions":[],"note":"n","lessons":[]}\n```'), { actions: [], note: 'n', lessons: [] });
+  assert.deepEqual(parseAnswer('Sure. {"actions":[],"note":"n","lessons":[]} Done.').actions, []);
+  assert.equal(parseAnswer('{"actions":[{"type":"BUY","coin":"AB'), null);
+  const raw = (body) => async () => ({ ok: true, status: 200, json: async () => body });
+  const mk = (body) => { const dir = mkdtempSync(path.join(os.tmpdir(), 'soc-v32-')); const now = Date.UTC(2026, 8, 30, 12); const c = []; for (let i = 60; i > 0; i -= 1) c.push([Math.floor(now / 60000) * 60 - i * 60, 1, 1.02, 0.99, 1, 1000]); const logs = []; const t = createSocratesTrader({ dataDir: dir, seriesSource: (x) => (x === 'ABC' ? { candles: c } : null), watch: { current: () => ({ picks: [{ coin: 'ABC' }] }) }, config: { enabled: true }, env: { ANTHROPIC_API_KEY: 'k' }, log: (l) => logs.push(l), fetchImpl: raw(body), clock: () => now, readTickersImpl: () => new Map([['ABC', { bid: 1, ask: 1.01, bidQty: 1e5, askQty: 1e5, ts: now }]]) }); return { t, logs, done: () => rmSync(dir, { recursive: true, force: true }) }; };
+  const cut = mk({ type: 'message', stop_reason: 'max_tokens', content: [{ type: 'text', text: '{"actions":[{"type":"BUY","coin":"AB' }], usage: { input_tokens: 10, output_tokens: 4000 } });
+  try { await cut.t.tick(); assert.ok(cut.logs.some((l) => l.includes('SCAN answer unusable (CUT_OFF_AT_MAX_TOKENS; stop max_tokens; blocks text; 4000 output tokens)'))); } finally { cut.done(); }
+  const ref = mk({ type: 'message', stop_reason: 'refusal', content: [], usage: { input_tokens: 10, output_tokens: 0 } });
+  try { await ref.t.tick(); assert.ok(ref.logs.some((l) => l.includes('answer unusable (REFUSAL'))); } finally { ref.done(); }
+  const fenced = mk({ type: 'message', stop_reason: 'end_turn', content: [{ type: 'thinking', thinking: '...' }, { type: 'text', text: '```json\n{"actions":[{"type":"BUY","coin":"ABC","usd":100,"price":null,"stop":0.95,"roomPct":8,"strategy":"OTHER","why":"x"}],"note":"n","lessons":[]}\n```' }], usage: { input_tokens: 10, output_tokens: 80 } });
+  try { await fenced.t.tick(); assert.ok(fenced.t.state().positions.ABC, 'the fenced answer traded'); assert.ok(fenced.logs.some((l) => l.includes('look (1 movers): BUY ABC'))); } finally { fenced.done(); }
+  assert.equal(TRADER_DEFAULTS.maxOutputTokens, 4000);
 });

@@ -37,7 +37,8 @@ import path from 'node:path';
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, appendFileSync, statSync } from 'node:fs';
 import { DEFAULT_MODEL_ID } from '../market-lab/policy.js'; // the research model id is declared once, in the policy (fenced)
 
-export const TRADER_VERSION = 'socrates-trader-3';
+export const TRADER_VERSION = 'socrates-trader-3'; // v3.2 keeps the v3 state shape: a running ledger carries over
+export const TRADER_BUILD = 'socrates-trader-3.2';
 export const TRADER_DEFAULTS = Object.freeze({
   enabled: false,
   model: DEFAULT_MODEL_ID,
@@ -75,7 +76,7 @@ export const TRADER_DEFAULTS = Object.freeze({
   album: { everyMs: 3_600_000, perSide: 3, jumpPct: 2, rocketPct: 10, dudPct: 3, minUsd1h: 10_000, barsBefore: 15, maxCoins: 800 },
   lessonsShown: 10,
   tickerFreshMs: 90_000,
-  maxOutputTokens: 1000,
+  maxOutputTokens: 4000,      // v3.2: 1000 cut his answers off in production (2026-10-01) — the answer is now never starved
   requestTimeoutMs: 60_000,
   pricing: { inputUsdPerMTok: 2, outputUsdPerMTok: 10, cacheReadUsdPerMTok: 0.2, cacheWriteUsdPerMTok: 2.5 },
 });
@@ -324,6 +325,15 @@ export function buildAlbum({ coins, seriesSource, nowTs, cfg }) {
   return { text, takeoffs, rockets, duds, shown: chosen.map((x) => ({ coin: x.coin, kind: x.kind, ts: x.ts, peakPct: x.peakPct })) };
 }
 
+// v3.2: the answer as JSON — plain, inside a ```json fence, or the outermost {...} of a chattier reply; null when none parses
+export function parseAnswer(text) {
+  const t = String(text ?? '').trim(); if (!t) return null;
+  const tries = [t]; const fence = t.match(/```(?:json)?\s*([\s\S]*?)```/i); if (fence) tries.push(fence[1].trim());
+  const a = t.indexOf('{'); const b = t.lastIndexOf('}'); if (a >= 0 && b > a) tries.push(t.slice(a, b + 1));
+  for (const x of tries) { try { const v = JSON.parse(x); if (v && typeof v === 'object' && !Array.isArray(v)) return v; } catch { /* next */ } }
+  return null;
+}
+
 export function createSocratesTrader({ dataDir, seriesSource, watch, config = {}, env = process.env, log = () => {}, fetchImpl = globalThis.fetch, clock = () => Date.now(), readTickersImpl = readTickers, tapeSnapshot = () => null } = {}) {
   if (typeof dataDir !== 'string' || !dataDir) throw new Error('createSocratesTrader: dataDir required');
   if (typeof seriesSource !== 'function') throw new Error('createSocratesTrader: seriesSource required');
@@ -334,7 +344,7 @@ export function createSocratesTrader({ dataDir, seriesSource, watch, config = {}
   const apiKey = env.ANTHROPIC_API_KEY; const keyPresent = typeof apiKey === 'string' && apiKey.length > 0;
   let state = loadState(); let timer = null; let busy = false; let lastScan = 0; let lastHold = 0; let lastSummary = 0; let warnedKey = false; let stopped = false;
   const lastTrip = new Map(); // coin -> ts of its last tripwire wake (in memory: a restart may wake once more, harmless)
-  let album = null; let albumTs = 0;
+  let album = null; let albumTs = 0; let lastSkipLog = 0;
 
   function newWindow(now, startEquity) { return { n: (state.cage.windows ?? 0) + 1, startTs: now, endsTs: now + cfg.windowHours * 3600_000, startEquityUsd: r2(startEquity), buys: 0, tradesAtStart: state?.trades ?? 0 }; }
   function fresh() { const now = clock(); return { version: TRADER_VERSION, startedTs: now, endsTs: now + cfg.durationHours * 3600_000, startingUsd: cfg.startingUsd, cashUsd: cfg.startingUsd, positions: {}, orders: {}, closed: [], notebook: [], owed: [], realizedUsd: 0, feesUsd: 0, trades: 0, wins: 0, spend: { day: dayKey(now), usd: 0, totalUsd: 0, calls: 0 }, ended: false, endReason: null, lastNote: null, cage: { level: 0, won: 0, lost: 0, neutral: 0, lostInARow: 0, windows: 1, pausedUntilTs: null, window: { n: 1, startTs: now, endsTs: now + cfg.windowHours * 3600_000, startEquityUsd: cfg.startingUsd, buys: 0, tradesAtStart: 0 } } }; }
@@ -521,9 +531,14 @@ export function createSocratesTrader({ dataDir, seriesSource, watch, config = {}
     clearTimeout(to);
     if (!res.ok || j?.type === 'error') { journal('MODEL_ERROR', { kind, status: res.status, error: clip(j?.error?.message ?? j?.error?.type, 160) }); log(`SOCRATES TRADER: model HTTP ${res.status} ${clip(j?.error?.type ?? '', 60)} ${clip(j?.error?.message ?? '', 140)}`); return { ok: false, reason: `HTTP_${res.status}` }; }
     if (j?.usage) { const act = actualUsd(j.usage); state.spend.usd += act - est; state.spend.totalUsd += act - est; }
-    const text = (Array.isArray(j?.content) ? j.content : []).filter((b) => b?.type === 'text').map((b) => b.text).join('');
-    let decision; try { decision = JSON.parse(text); } catch { journal('MODEL_ERROR', { kind, error: 'answer is not JSON', text: clip(text, 300) }); return { ok: false, reason: 'JSON' }; }
-    if (!decision || !Array.isArray(decision.actions)) { journal('MODEL_ERROR', { kind, error: 'no actions array' }); return { ok: false, reason: 'SCHEMA' }; }
+    const blocks = Array.isArray(j?.content) ? j.content : []; const text = blocks.filter((b) => b?.type === 'text').map((b) => b.text).join('');
+    const stop = typeof j?.stop_reason === 'string' ? j.stop_reason : null;
+    // v3.2: every unusable answer is LOUD (it was silent in production: paid for, never acted on)
+    const unusable = (reason) => { const info = { kind, reason, stop, blocks: blocks.map((b) => b?.type).join(','), outTokens: j?.usage?.output_tokens ?? null, text: clip(text, 240) }; journal('MODEL_ERROR', info); log(`SOCRATES TRADER: ${kind} answer unusable (${reason}; stop ${stop ?? '?'}; blocks ${info.blocks || 'none'}; ${info.outTokens ?? '?'} output tokens) "${clip(text, 160)}"`); return { ok: false, reason }; };
+    if (stop === 'refusal') return unusable('REFUSAL');
+    const decision = parseAnswer(text);
+    if (!decision) return unusable(stop === 'max_tokens' ? 'CUT_OFF_AT_MAX_TOKENS' : 'NOT_JSON');
+    if (!Array.isArray(decision.actions)) return unusable('NO_ACTIONS_ARRAY');
     return { ok: true, decision, model: j.model ?? null, usage: j.usage ?? null };
   }
 
@@ -534,7 +549,7 @@ export function createSocratesTrader({ dataDir, seriesSource, watch, config = {}
     const picks = (watch.current()?.picks ?? []).filter((p) => !state.positions[p.coin] && !tripped.includes(p.coin) && freshTicker(tk, p.coin)).slice(0, tripped.length ? cfg.moversShownOnTrip : cfg.moversShown);
     const held = [...new Set([...Object.keys(state.positions), ...Object.keys(state.orders)])]; const order = [...new Set([...tripped, ...held, ...picks.map((p) => p.coin)])];
     const charts = []; const shown = new Set(); for (const coin of order) { const c = liveChart(coin, tk, cfg.candlesShown); if (c) { charts.push(c); shown.add(coin); } }
-    if (!charts.length) { journal('SKIP', { kind: 'SCAN', why: 'no moving coin with a fresh price and chart' }); return; }
+    if (!charts.length) { journal('SKIP', { kind: 'SCAN', why: 'no moving coin with a fresh price and chart' }); if (clock() - lastSkipLog >= 30 * 60_000) { lastSkipLog = clock(); log(`SOCRATES TRADER: look skipped — no watched mover had a fresh price and chart (${(watch.current()?.picks ?? []).length} on the watch, ${tk.size} prices)`); } return; }
     const moverLines = picks.map((p) => `${p.coin}: on the watch ${Math.round((clock() - (p.sinceTs ?? clock())) / 60_000)} min; 1h range ${p.range1hPct ?? '?'}% move ${p.ret1hPct ?? '?'}%; $${Math.round((p.usdVol1h ?? 0) / 1000)}k and ${p.trades1h ?? '?'} trades in the hour${p.range4hPct != null ? `; 4h range ${p.range4hPct}%` : ''}`);
     const head = trips.length
       ? `TRIPWIRE — a launch seconds old. ${trips.map((x) => `${x.coin} is up ${x.jumpPct}% over its last closed minute (${x.tradesLastMinute ?? '?'} trades in that minute, ${x.buyShare != null ? `buyers ${Math.round(x.buyShare * 100)}% of the last minute, ` : ''}1h range ${x.range1hPct ?? '?'}%, $${Math.round(x.usd1h / 1000)}k in the hour)`).join('; ')}. Strike or pass — decide now. The other movers and your holdings follow.`
@@ -629,8 +644,8 @@ export function createSocratesTrader({ dataDir, seriesSource, watch, config = {}
   }
 
   function start() {
-    if (existsSync(P.state) && state.startedTs) log(`SOCRATES TRADER resumes: equity from state, started ${new Date(state.startedTs).toISOString().slice(0, 16)}Z, ends ${new Date(state.endsTs).toISOString().slice(0, 16)}Z${state.ended ? ` (ALREADY FINISHED: ${state.endReason} — nothing to do)` : ''}`);
-    if (!existsSync(P.state)) { saveState(); log(`SOCRATES TRADER starts: $${state.startingUsd} paper account, model ${cfg.model}, spend cap $${cfg.dailyUsd}/day, ${cfg.windowHours} h windows (lose ${cfg.maxLostInARow} in a row and the run ends), limit orders at the ${cfg.makerFeeRate * 100}% maker fee, half off at +${cfg.takeHalfAtPct}%, tripwire +${cfg.tripwire.jumpPct}%/min, auto-trail ${cfg.trail.pct}% from +${cfg.trail.armAtPct}%, album + notebook + tape, ends ${new Date(state.endsTs).toISOString().slice(0, 16)}Z — no Judge; its own ledger at ${P.dir}`); journal('START', { startingUsd: state.startingUsd, endsTs: state.endsTs, model: cfg.model, dailyUsd: cfg.dailyUsd, windowHours: cfg.windowHours }); }
+    if (existsSync(P.state) && state.startedTs) log(`SOCRATES TRADER resumes (${TRADER_BUILD}): equity from state, started ${new Date(state.startedTs).toISOString().slice(0, 16)}Z, ends ${new Date(state.endsTs).toISOString().slice(0, 16)}Z${state.ended ? ` (ALREADY FINISHED: ${state.endReason} — nothing to do)` : ''}`);
+    if (!existsSync(P.state)) { saveState(); log(`SOCRATES TRADER starts (${TRADER_BUILD}): $${state.startingUsd} paper account, model ${cfg.model}, spend cap $${cfg.dailyUsd}/day, ${cfg.windowHours} h windows (lose ${cfg.maxLostInARow} in a row and the run ends), limit orders at the ${cfg.makerFeeRate * 100}% maker fee, half off at +${cfg.takeHalfAtPct}%, tripwire +${cfg.tripwire.jumpPct}%/min, auto-trail ${cfg.trail.pct}% from +${cfg.trail.armAtPct}%, album + notebook + tape, ends ${new Date(state.endsTs).toISOString().slice(0, 16)}Z — no Judge; its own ledger at ${P.dir}`); journal('START', { startingUsd: state.startingUsd, endsTs: state.endsTs, model: cfg.model, dailyUsd: cfg.dailyUsd, windowHours: cfg.windowHours }); }
     timer = setInterval(() => { tick(); }, cfg.tickMs); if (typeof timer?.unref === 'function') timer.unref();
     setTimeout(() => { tick(); }, 5_000).unref?.();
   }
