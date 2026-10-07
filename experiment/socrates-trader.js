@@ -38,7 +38,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, appendF
 import { DEFAULT_MODEL_ID } from '../market-lab/policy.js'; // the research model id is declared once, in the policy (fenced)
 
 export const TRADER_VERSION = 'socrates-trader-3'; // v3.2 keeps the v3 state shape: a running ledger carries over
-export const TRADER_BUILD = 'socrates-trader-3.5';
+export const TRADER_BUILD = 'socrates-trader-3.6';
 export const TRADER_DEFAULTS = Object.freeze({
   enabled: false,
   model: DEFAULT_MODEL_ID,
@@ -70,7 +70,10 @@ export const TRADER_DEFAULTS = Object.freeze({
   minTradeUsd: 25,
   maxTradeFractionOfEquity: 0.5,
   minRoomPct: 4,              // a BUY / LIMIT_BUY must see at least this much room, or it is refused
-  stopFloor: { fractionOfRange1h: 0.4, minPct: 2.5 }, // v3.5: a stop closer than 40% of the hour's range (never under 2.5%) sits inside the noise — refused (PROMPT, 2026-10-01: a 2% stop on a 9.6% coin, a flash crash blew through it at -14%)
+  stopFloor: { fractionOfRange1h: 0.4, minPct: 2.5 },
+  dayShift: { startUtc: 13, endUtc: 21 }, // v3.6: new buys only 13:00-21:00 UTC (9 am-5 pm ET). Replay 10-04..10-07: every variant did better in these hours; the worst were 05-12 UTC. Off shift he only guards what he holds
+  deadCoin: { minChangePct24h: 0, minPos24: 0.25 }, // v3.6: a coin DOWN on the day, or in the bottom quarter of its 24h range, is refused — replay: those lost -2.2%/trade at a 26% win rate (dying coins bouncing on the way down); the rest +0.7% at 69% when fresh volume arrived
+  freshVolumeX: 2,            // v3.6: the pocket scan ranks by the hour's dollars vs the coin's normal hour (24h volume / 24); 2x+ is 'fresh money' (replay: +0.9%/trade at 71% vs -2.2% under 2x) // v3.5: a stop closer than 40% of the hour's range (never under 2.5%) sits inside the noise — refused (PROMPT, 2026-10-01: a 2% stop on a 9.6% coin, a flash crash blew through it at -14%)
   limitTtlMs: 30 * 60_000,    // a resting limit order expires after 30 minutes
   limitMaxBelowPct: 15,       // a limit more than 15% under the bid is refused (a wish, not an order)
   takeHalfAtPct: 4,           // half off at +4% (maker)
@@ -200,14 +203,15 @@ export const SYSTEM_PROMPT = [
   '',
   '== DECIDE FAST, LIKE THIS ==',
   '1. Weather: is BTC falling hard right now? If so, trade smaller or wait.',
-  '2. Candidates: which shown coins are WILD (1h range 7%+), still TRADING (prints every minute, real dollars), and NOT already extended (not up 3%+ in the last 15 minutes)? The POCKET coins at the top of the list were found for you across every Kraken coin by the one rule that held in every study (wild, just dipped, liquid) — start there.',
+  '2. Candidates: which shown coins are WILD (1h range 7%+), still TRADING (prints every minute, real dollars), and NOT already extended (not up 3%+ in the last 15 minutes)? The POCKET coins at the top of the list were found for you across every Kraken coin by the one rule that held in every study (wild, just dipped, liquid) — start there. They are ranked LIVE COINS FIRST, then by FRESH MONEY (the hour\'s dollars vs the coin\'s normal hour).',
+  '2b. THE WINNER\'S SHAPE (replay of 10-04..10-07, 155 fills). The losers: a coin DOWN on the day or in the bottom quarter of its 24h range — a dying coin bouncing on the way down: -2.2% a trade, 26% win. The code now refuses those (DEAD COIN). The winners: UP on the day, off its lows, and the last hour traded 2x+ its normal volume (FRESH MONEY): +0.7% a trade, 69% win; in US hours +1.1% and 76%. That is TREND_PULLBACK_CONTINUATION — buy the dip in a coin that is already winning today, when new money is arriving. Prefer 2x+ fresh money; a pocket with no fresh money is a maybe, not a buy. Outside research agrees: in thin coins yesterday\'s losers keep losing; the money is in 6-24 h momentum, not in buying every dip.',
   '3. Entry: is there a pullback being reclaimed, a coil breaking out, a reclaim of the last minute\'s average, or a calm-crowd takeoff seconds old? If the only thing on offer is a coin that spiked minutes ago, pass.',
   '4. Room and stop: where would the run stall (roomPct — at least 4%, and you want far more)? Where does the setup break? The last swing low or the low of the last few bars. Distance from entry to stop is your risk. If that risk is more than about 5% of price, the position is too wild for a full size — go smaller or pass.',
   '5. Size: risk about 1-2% of equity per trade on the stop distance (position = risk dollars / stop distance %), then respect the limits. When the setup is A-grade (wild coin, dip reclaimed or calm takeoff, steady prints, BTC calm) size up toward the maximum; when it is B-grade size down or pass.',
   '6. Manage: the auto-trail protects a winner; you can raise the stop faster under each new higher low, giving a runner its 3-8% breathing room; sell outright when the move stalls with sellers in control (long upper wicks, red bars on rising volume, failure to make a new high for 10+ minutes near the top) or when the reason you bought is gone. Do not sell a working runner just because it is up a few percent.',
   '6b. THE FIRST SHAKE: when the tripwire wakes you on an A-grade launch (wild, liquid, calm crowd, buyers 90%+), the history says the real rockets shake 3-8% on the way up and that chasing the jump loses. So rest a LIMIT_BUY 3-5% under the current price, stop under the launch bar\'s low, room measured to the launch high and beyond — it fills on the first shake at the maker fee, or expires and you lost nothing. Only on a launch that is already running away on steady prints and real dollars is a market BUY right, and then size for the shake you know is coming.',
   '6c. REST THE NET: a look that ends with no action AND no resting order on a wild, liquid coin is usually a wasted look. If the best coins on offer are wild but extended, do not just pass — rest the limit where their dip would land and let the market come to you. Your slots are for resting bids as much as for positions.',
-  '6d. THE HOURS: 0-6 UTC is thin — prints are sparse and fake spikes are common; be slow and demanding. 13-21 UTC (US daytime) is when the week\'s rockets flew; that is when you are hungriest, when you rest more nets and press winners harder.',
+  '6d. THE HOURS — DAY SHIFT: new buys are taken 13:00-21:00 UTC (9 am-5 pm ET) only; the code refuses a buy outside it and does not scan then. The replay lost money in every other hour (05-12 UTC worst). Inside the shift you are hungriest: rest more nets, press winners harder. Off shift you guard what you hold: stops, the trail, half off, and SELL if a hold breaks.',
   '7. Cut: a position that goes nowhere for 20-30 minutes and starts to roll over is a dud — sell it and free the slot. Never add to a loser.',
   '',
   '== ANSWER ==',
@@ -254,7 +258,8 @@ export function readTickers(dataDir) {
     const t = rec?.ticker; const p = t?.payload; if (!p) continue;
     const bid = Number(p.bid); const ask = Number(p.ask); if (!(bid > 0 && ask > 0 && ask >= bid)) continue;
     const ts = Number.isSafeInteger(snap.updatedTs) ? snap.updatedTs : null; // the collector's heartbeat: a quiet coin's last ticker is still its standing quote while the stream is alive
-    out.set(coin, { bid, ask, bidQty: Number(p.bidQty) || 0, askQty: Number(p.askQty) || 0, ts });
+    const n = (v) => (Number.isFinite(Number(v)) ? Number(v) : null);
+    out.set(coin, { bid, ask, bidQty: Number(p.bidQty) || 0, askQty: Number(p.askQty) || 0, ts, changePct24h: n(p.changePct24h), high24h: n(p.high24h), low24h: n(p.low24h), usd24h: n(p.volume24hBase) != null && n(p.vwap24h) != null ? n(p.volume24hBase) * n(p.vwap24h) : null });
   }
   return out;
 }
@@ -348,19 +353,30 @@ export function parseAnswer(text) {
 
 // THE POCKET SCAN (pure, v3.3): across every coin the collector holds, the one shape that held in every study — 1-hour range
 // over rangeMinPct, the last redMinutes closed red (a dip), usd-per-hour at least minUsd1h. Wildest first.
-export function pocketScan({ coins, seriesSource, ticker, nowTs, cfg, exclude = new Set() }) {
+export function pocketScan({ coins, seriesSource, ticker, nowTs, cfg, exclude = new Set(), freshVolumeX = 2 }) {
   const out = [];
   for (const coin of coins) {
-    if (exclude.has(coin) || !ticker(coin)) continue;
+    const tk = ticker(coin); if (exclude.has(coin) || !tk) continue;
     let s; try { s = seriesSource(coin); } catch { continue; } const c = s?.candles; if (!Array.isArray(c) || c.length < 20) continue;
     const last = c[c.length - 1]; if (last[0] * 1000 < nowTs - 180_000) continue;
     const h1 = c.filter((x) => x[0] * 1000 >= nowTs - 3600_000); if (h1.length < 10) continue;
     let hi = -Infinity, lo = Infinity, usd = 0; for (const x of h1) { if (x[2] > hi) hi = x[2]; if (x[3] < lo) lo = x[3]; usd += (x[5] ?? 0) * x[4]; }
     if (!(lo > 0) || usd < cfg.minUsd1h) continue; const rangePct = (hi / lo - 1) * 100; if (rangePct < cfg.rangeMinPct) continue;
     const back = Math.min(cfg.redMinutes, c.length - 1); const ref = c[c.length - 1 - back][1]; if (!(last[4] < ref)) continue; // the dip
-    out.push({ coin, range1hPct: r2(rangePct), dipPct: r2((last[4] / ref - 1) * 100), usd1h: Math.round(usd), fromHighPct: r2((last[4] / hi - 1) * 100) });
+    const d = dayFacts(tk, last[4]);
+    out.push({ coin, range1hPct: r2(rangePct), dipPct: r2((last[4] / ref - 1) * 100), usd1h: Math.round(usd), fromHighPct: r2((last[4] / hi - 1) * 100), volX: d.usd24h > 0 ? r2(usd / (d.usd24h / 24)) : null, changePct24h: d.changePct24h, pos24: d.pos24, dead: d.dead });
   }
-  return out.sort((a, b) => b.range1hPct - a.range1hPct);
+  // v3.6: live coins first (a dead coin is shown last, flagged), then by fresh money (volX), then by range
+  return out.sort((a, b) => (a.dead === b.dead ? ((b.volX ?? 0) - (a.volX ?? 0)) || (b.range1hPct - a.range1hPct) : (a.dead ? 1 : -1)));
+}
+
+// v3.6: the day facts behind the DEAD COIN rule, from the collector's 24h ticker fields (null when the ticker lacks them)
+export function dayFacts(tk, px, cfg = TRADER_DEFAULTS.deadCoin) {
+  const chg = Number.isFinite(tk?.changePct24h) ? tk.changePct24h : null;
+  const hi = tk?.high24h, lo = tk?.low24h; const p = px ?? tk?.bid;
+  const pos24 = Number.isFinite(hi) && Number.isFinite(lo) && hi > lo && Number.isFinite(p) ? r2((p - lo) / (hi - lo)) : null;
+  const dead = (chg != null && chg <= cfg.minChangePct24h) || (pos24 != null && pos24 <= cfg.minPos24);
+  return { changePct24h: chg == null ? null : r2(chg), pos24, usd24h: Number.isFinite(tk?.usd24h) ? tk.usd24h : null, dead };
 }
 
 export function createSocratesTrader({ dataDir, seriesSource, watch, config = {}, env = process.env, log = () => {}, fetchImpl = globalThis.fetch, clock = () => Date.now(), readTickersImpl = readTickers, tapeSnapshot = () => null } = {}) {
@@ -390,6 +406,10 @@ export function createSocratesTrader({ dataDir, seriesSource, watch, config = {}
   const posCap = (tk) => (equity(tk) > state.startingUsd ? cfg.maxPositionsWhenUp : cfg.maxPositions);
   function rollDay() { const d = dayKey(clock()); if (state.spend.day !== d) state.spend = { ...state.spend, day: d, usd: 0 }; }
   const caged = () => Number.isSafeInteger(state.cage.pausedUntilTs) && clock() < state.cage.pausedUntilTs;
+  // v3.6 DAY SHIFT: new buys (and the scans that find them) only between startUtc and endUtc; off shift he guards what he holds
+  const onShift = () => { const h = new Date(clock()).getUTCHours(); const { startUtc: a, endUtc: b } = cfg.dayShift; return a < b ? (h >= a && h < b) : (h >= a || h < b); };
+  const shiftText = () => `${String(cfg.dayShift.startUtc).padStart(2, '0')}:00-${String(cfg.dayShift.endUtc).padStart(2, '0')}:00 UTC`;
+  let lastShift = null;
   function slowdown() {
     const now = clock(); let f = 1; const why = [];
     const h = new Date(now).getUTCHours(); if (h < 6) { f *= cfg.overnightSlowdown; why.push('overnight'); }
@@ -474,6 +494,8 @@ export function createSocratesTrader({ dataDir, seriesSource, watch, config = {}
       if (a.type === 'BUY' || a.type === 'LIMIT_BUY') {
         const limit = a.type === 'LIMIT_BUY';
         if (!allowBuy) { refuse(caged() ? 'in the cage — no buys until the pause ends' : 'buys are only taken on a movers look'); continue; }
+        if (!onShift()) { refuse(`off shift — new buys are taken ${shiftText()} only (the replay lost money in every other hour); guard what you hold`); continue; }
+        { const d = dayFacts(t, t.ask, cfg.deadCoin); if (d.dead) { refuse(`DEAD COIN — ${d.changePct24h != null ? `${d.changePct24h >= 0 ? '+' : ''}${d.changePct24h}% on the day` : 'no day change'}${d.pos24 != null ? `, ${Math.round(d.pos24 * 100)}% up its 24h range` : ''}: a coin down on the day or in the bottom quarter of its range is a dying coin bouncing on the way down (replay: -2.2%/trade, 26% win) — leave it alone`); continue; } }
         if (shownCoins && !shownCoins.has(coin)) { refuse('not shown on this look'); continue; }
         const held = state.positions[coin]; let adding = false;
         if (held) { const be = held.entryPx * (1 + 2 * cfg.feeRate + 0.002); const up = ((t.bid / held.entryPx) - 1) * 100; if (up < cfg.pressAtPct || held.stop < be - 1e-12) { refuse(`already held and not yet a proven winner (up ${r2(up)}%, stop ${sig(held.stop)} vs break-even ${sig(be)}) — press a winner only once it is up ${cfg.pressAtPct}% with break-even locked`); continue; } adding = true; }
@@ -596,12 +618,13 @@ export function createSocratesTrader({ dataDir, seriesSource, watch, config = {}
   async function scan(tk, trips = []) {
     const tripped = trips.map((x) => x.coin);
     const picks = (watch.current()?.picks ?? []).filter((p) => !state.positions[p.coin] && !tripped.includes(p.coin) && freshTicker(tk, p.coin)).slice(0, tripped.length ? cfg.moversShownOnTrip : cfg.moversShown);
-    let pocket = []; try { const coins = typeof seriesSource.coins === 'function' ? seriesSource.coins() : []; pocket = pocketScan({ coins, seriesSource, ticker: (c) => freshTicker(tk, c), nowTs: clock(), cfg: cfg.pocket, exclude: new Set([...tripped, ...Object.keys(state.positions), ...Object.keys(state.orders)]) }).slice(0, tripped.length ? 2 : cfg.pocketShown); } catch (err) { log(`SOCRATES TRADER pocket scan failed (contained): ${clip(err?.message ?? err, 120)}`); }
+    let pocket = []; try { const coins = typeof seriesSource.coins === 'function' ? seriesSource.coins() : []; pocket = pocketScan({ coins, seriesSource, ticker: (c) => freshTicker(tk, c), nowTs: clock(), cfg: cfg.pocket, freshVolumeX: cfg.freshVolumeX, exclude: new Set([...tripped, ...Object.keys(state.positions), ...Object.keys(state.orders)]) }).slice(0, tripped.length ? 2 : cfg.pocketShown); } catch (err) { log(`SOCRATES TRADER pocket scan failed (contained): ${clip(err?.message ?? err, 120)}`); }
     const pocketCoins = pocket.map((x) => x.coin);
     const held = [...new Set([...Object.keys(state.positions), ...Object.keys(state.orders)])]; const order = [...new Set([...tripped, ...pocketCoins, ...held, ...picks.map((p) => p.coin)])];
     const charts = []; const shown = new Set(); for (const coin of order) { const c = liveChart(coin, tk, cfg.candlesShown); if (c) { charts.push(c); shown.add(coin); } }
     if (!charts.length) { journal('SKIP', { kind: 'SCAN', why: 'no moving coin with a fresh price and chart' }); if (clock() - lastSkipLog >= 30 * 60_000) { lastSkipLog = clock(); log(`SOCRATES TRADER: look skipped — no watched mover had a fresh price and chart (${(watch.current()?.picks ?? []).length} on the watch, ${tk.size} prices)`); } return; }
-    const pocketLines = pocket.map((x) => `${x.coin}: POCKET — 1h range ${x.range1hPct}%, last ${cfg.pocket.redMinutes} min ${x.dipPct}% (a dip), ${x.fromHighPct}% off the hour high, $${Math.round(x.usd1h / 1000)}k in the hour`);
+    const dayText = (x) => `${x.changePct24h != null ? `${x.changePct24h >= 0 ? '+' : ''}${x.changePct24h}% on the day` : 'day change ?'}${x.pos24 != null ? `, ${Math.round(x.pos24 * 100)}% up its 24h range` : ''}${x.volX != null ? `, ${x.volX}x its normal hour's volume${x.volX >= cfg.freshVolumeX ? ' (FRESH MONEY)' : ''}` : ''}${x.dead ? ' — DEAD COIN (the code refuses it)' : ''}`;
+    const pocketLines = pocket.map((x) => `${x.coin}: POCKET — 1h range ${x.range1hPct}%, last ${cfg.pocket.redMinutes} min ${x.dipPct}% (a dip), ${x.fromHighPct}% off the hour high, $${Math.round(x.usd1h / 1000)}k in the hour; ${dayText(x)}`);
     const moverLines = picks.map((p) => `${p.coin}: on the watch ${Math.round((clock() - (p.sinceTs ?? clock())) / 60_000)} min; 1h range ${p.range1hPct ?? '?'}% move ${p.ret1hPct ?? '?'}%; $${Math.round((p.usdVol1h ?? 0) / 1000)}k and ${p.trades1h ?? '?'} trades in the hour${p.range4hPct != null ? `; 4h range ${p.range4hPct}%` : ''}`);
     const head = trips.length
       ? `TRIPWIRE — a launch seconds old. ${trips.map((x) => `${x.coin} is up ${x.jumpPct}% over its last closed minute (${x.tradesLastMinute ?? '?'} trades in that minute, ${x.buyShare != null ? `buyers ${Math.round(x.buyShare * 100)}% of the last minute, ` : ''}1h range ${x.range1hPct ?? '?'}%, $${Math.round(x.usd1h / 1000)}k in the hour)`).join('; ')}. Strike or pass — decide now. The other movers and your holdings follow.`
@@ -683,10 +706,11 @@ export function createSocratesTrader({ dataDir, seriesSource, watch, config = {}
       if (!keyPresent) { if (!warnedKey) { warnedKey = true; log('SOCRATES TRADER: ANTHROPIC_API_KEY is not set — the trader waits (no model call is possible); stops on held coins still run'); } }
       else {
         refreshAlbum();
-        const trips = tripwire(tk);
+        const shift = onShift(); if (shift !== lastShift) { lastShift = shift; log(shift ? `SOCRATES TRADER DAY SHIFT begins (${shiftText()}): hunting — scans, tripwire and new buys are on` : `SOCRATES TRADER DAY SHIFT ends: no new buys until ${shiftText()} — he guards what he holds (stops, trail, half off, fills); no scans, no model spend on empty hours`); }
+        const trips = shift ? tripwire(tk) : [];
         if (trips.length) { lastScan = now; lastHold = now; log(`SOCRATES TRADER TRIPWIRE: ${trips.map((x) => `${x.coin} +${x.jumpPct}% (${x.tradesLastMinute ?? '?'} trades${x.buyShare != null ? `, ${Math.round(x.buyShare * 100)}% buyers` : ''})`).join(', ')} — waking him now`); await scan(tk, trips); }
         else if ((Object.keys(state.positions).length || state.owed.length) && now - lastHold >= cfg.holdCheckEveryMs && now - lastScan >= 20_000) { lastHold = now; await holdCheck(tk); }
-        else if (!caged() && now - lastScan >= lookEveryMs()) { lastScan = now; lastHold = now; await scan(tk); }
+        else if (!caged() && shift && now - lastScan >= lookEveryMs()) { lastScan = now; lastHold = now; await scan(tk); }
       }
       saveState();
       if (now - lastSummary >= 10 * 60_000) { lastSummary = now; const s = writeStatus(tickers()); log(`SOCRATES TRADER: equity $${s.equityUsd} (${s.returnPct >= 0 ? '+' : ''}${s.returnPct}%), cash $${s.cashUsd}, holding ${Object.keys(state.positions).join(', ') || 'nothing'}${Object.keys(state.orders).length ? `, resting ${Object.keys(state.orders).join(', ')}` : ''}, ${s.trades} closed trades (${s.wins} won), windows won ${state.cage.won} lost ${state.cage.lost}${caged() ? ' (IN THE CAGE)' : ` (level ${state.cage.level + 1})`}, model spend today $${s.spend.todayUsd} of $${cfg.dailyUsd}`); }
