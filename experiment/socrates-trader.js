@@ -38,7 +38,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, appendF
 import { DEFAULT_MODEL_ID } from '../market-lab/policy.js'; // the research model id is declared once, in the policy (fenced)
 
 export const TRADER_VERSION = 'socrates-trader-3'; // v3.2 keeps the v3 state shape: a running ledger carries over
-export const TRADER_BUILD = 'socrates-trader-3.3';
+export const TRADER_BUILD = 'socrates-trader-3.5';
 export const TRADER_DEFAULTS = Object.freeze({
   enabled: false,
   model: DEFAULT_MODEL_ID,
@@ -70,6 +70,7 @@ export const TRADER_DEFAULTS = Object.freeze({
   minTradeUsd: 25,
   maxTradeFractionOfEquity: 0.5,
   minRoomPct: 4,              // a BUY / LIMIT_BUY must see at least this much room, or it is refused
+  stopFloor: { fractionOfRange1h: 0.4, minPct: 2.5 }, // v3.5: a stop closer than 40% of the hour's range (never under 2.5%) sits inside the noise — refused (PROMPT, 2026-10-01: a 2% stop on a 9.6% coin, a flash crash blew through it at -14%)
   limitTtlMs: 30 * 60_000,    // a resting limit order expires after 30 minutes
   limitMaxBelowPct: 15,       // a limit more than 15% under the bid is refused (a wish, not an order)
   takeHalfAtPct: 4,           // half off at +4% (maker)
@@ -79,7 +80,9 @@ export const TRADER_DEFAULTS = Object.freeze({
   album: { everyMs: 3_600_000, perSide: 3, jumpPct: 2, rocketPct: 10, dudPct: 3, minUsd1h: 10_000, barsBefore: 15, maxCoins: 800 },
   lessonsShown: 10,
   tickerFreshMs: 90_000,
-  maxOutputTokens: 4000,      // v3.2: 1000 cut his answers off in production (2026-10-01) — the answer is now never starved
+  maxOutputTokens: 8000,      // v3.4: 4000 was eaten whole by his thinking in production (21 of ~38 looks came back empty, 2026-10-01)
+  maxOutputTokensCeiling: 16000, // a cut-off doubles the room, up to this
+  effort: 'medium',           // v3.4: less thinking, more answer (output_config.effort, the same switch the repo already uses with this model)
   requestTimeoutMs: 60_000,
   pricing: { inputUsdPerMTok: 2, outputUsdPerMTok: 10, cacheReadUsdPerMTok: 0.2, cacheWriteUsdPerMTok: 2.5 },
 });
@@ -111,10 +114,11 @@ export const SYSTEM_PROMPT = [
   '- TWO WAYS TO BUY. BUY takes the ask now and pays the TAKER fee (0.8%) plus the spread — use it only when a launch will not wait. LIMIT_BUY rests your bid at a price UNDER the current bid and pays the MAKER fee (0.4%) with no spread: it fills only if the price trades THROUGH your price (a later minute trades below it, or the live price drops below it), it expires after 30 minutes, and CANCEL removes it. A limit round trip costs about half a market one. Resting bids are how you buy the dip on a wild coin — the best moment in the history — without having to be awake at the bottom. Put the limit where the dip would land (the last swing low, the minute\'s average, the base of the coil), not a hair under the bid. An open limit order takes a position slot.',
   '- Every BUY and LIMIT_BUY states roomPct: the move you can see room for, in percent, from your fill price (the ask for BUY, your limit for LIMIT_BUY) to where the run would stall (the next resistance, the 4-hour high, the top of the coil measured from its bottom). Under 4% is refused by the code. Do not invent room — if you cannot see 4% you pass.',
   '- HALF OFF: once a position is up 4%, the code sells HALF of it at +4% as a resting maker sell (0.4% fee) and the rest rides on the stop and the auto-trail. That locks a green window and lets the runner run. Size with that in mind.',
+  '- THE STOP FLOOR (code): a stop closer than 40% of the coin\'s 1-hour range (never under 2.5%) is refused — on a coin ranging 10% an hour your stop sits 4%+ under. A tighter stop is not safety; it is a guaranteed stop-out inside the noise, and a flash crash gaps straight through it. Size the position to the stop, not the stop to the position.',
   '- Every BUY needs a stop price BELOW the current bid (a LIMIT_BUY: below your limit). The bid is checked every 15 seconds; a bid at or under your stop sells automatically. Set the stop where a real break of the setup would happen, not a hair under your entry, or the coin\'s ordinary wiggle will take you out.',
   '- THE AUTO-TRAIL works for you between looks: once a position is up 3% the code raises the stop to break-even after fees; once it is up 6% the stop trails 5% under the highest bid since you bought, moving every 15 seconds. You may raise a stop further with MOVE_STOP whenever you see a reason. A stop is NEVER lowered — the code refuses it.',
   '- THE TRIPWIRE wakes you the moment a watched coin jumps 2%+ over its last closed minute with a calm crowd. When you are woken like that, the launch is seconds old. Decide fast: strike or pass. Nothing else on that look matters more.',
-  '- THE TAPE LINE under a chart (when Serpent\'s live tape carries the coin) shows the BUYER SHARE of the trades in the last 15 seconds, 1 minute and 5 minutes, and the dollars of bids vs offers resting within 0.25% of the mid. The tick study\'s strongest clue: real rockets launched on 100% buyers with a calm crowd; duds on mixed buying (about 60%). Offers stacked far above bids near the price = a wall to climb.',
+  '- THE TAPE LINE under a chart (when Serpent\'s live tape carries the coin) shows the BUYER SHARE of the trades in the last 1 minute and 5 minutes (a 15-second reading is noise — NIGHT, 2026-10-01, was bought on a 15-second blip and sold a minute later for the fees), and the dollars of bids vs offers resting within 0.25% of the mid. The tick study\'s strongest clue: real rockets launched on 100% buyers with a calm crowd; duds on mixed buying (about 60%). Offers stacked far above bids near the price = a wall to climb.',
   '- THE ALBUM (after these rules) shows real takeoffs from the last 6 hours of THIS market — rockets and duds, the 15 minutes before and what happened after. Study it like film before a fight: which shape ran, which faded.',
   '- THE NOTEBOOK: after every trade closes you write yourself one lesson (in "lessons", naming the coin). Your last 10 lessons are shown to you on every look. Be specific and honest — what you saw, what happened, what you will do differently. That is how you get better inside this run.',
   '- Looks slow down overnight (0-6 UTC, thin and jumpy) and when your day\'s budget runs ahead of the clock, so your attention is spent when the runners run.',
@@ -277,7 +281,7 @@ export function tapeFacts(snap, nowTs, freshMs = 60_000) {
 }
 export function flowText(f) {
   if (!f) return null; const pc = (x) => (x == null ? 'no trades' : `${Math.round(x * 100)}%`);
-  return `tape (${f.ageS}s old): buyers ${pc(f.buy15s)} of the last 15 s, ${pc(f.buy1m)} of the last minute, ${pc(f.buy5m)} of 5 min; within 0.25% of the mid $${f.bidUsd25 ?? '?'} of bids vs $${f.askUsd25 ?? '?'} of offers${f.spreadBps != null ? `; spread ${f.spreadBps} bps` : ''}`;
+  return `tape (${f.ageS}s old): buyers ${pc(f.buy1m)} of the last minute, ${pc(f.buy5m)} of 5 min; within 0.25% of the mid $${f.bidUsd25 ?? '?'} of bids vs $${f.askUsd25 ?? '?'} of offers${f.spreadBps != null ? `; spread ${f.spreadBps} bps` : ''}`;
 }
 
 // THE TRIPWIRE (pure): a watched coin whose live bid is jumpPct+ over the close of its last closed minute, with a calm crowd on
@@ -478,6 +482,7 @@ export function createSocratesTrader({ dataDir, seriesSource, watch, config = {}
         const px = limit ? Number(a.price) : t.ask;
         if (limit) { if (!(px > 0 && px < t.bid)) { refuse(`limit ${a.price} must be under the bid ${sig(t.bid)} — at or above it, it would take the market: use BUY`); continue; } if ((1 - px / t.bid) * 100 > cfg.limitMaxBelowPct) { refuse(`limit ${sig(px)} is more than ${cfg.limitMaxBelowPct}% under the bid — a wish, not an order`); continue; } }
         if (!(Number(a.stop) > 0 && Number(a.stop) < (limit ? px : t.bid))) { refuse(`stop ${a.stop} must be above 0 and below the ${limit ? `limit ${sig(px)}` : `bid ${sig(t.bid)}`}`); continue; }
+        { const r1h = range1hOf(coin); const need = Math.max(cfg.stopFloor.minPct, r1h != null ? r1h * cfg.stopFloor.fractionOfRange1h : 0); const dist = (1 - Number(a.stop) / (limit ? px : t.bid)) * 100; if (dist < need - 1e-9) { refuse(`stop ${sig(Number(a.stop))} is only ${r2(dist)}% under — inside the noise of a coin ranging ${r1h == null ? '?' : r2(r1h)}% an hour; the floor is ${r2(need)}% (a stop inside the noise gets blown through, not honoured)`); continue; } }
         if (!(Number(a.roomPct) >= cfg.minRoomPct)) { refuse(`room ${a.roomPct}% is under the ${cfg.minRoomPct}% minimum — a move that cannot pay the fees is not taken`); continue; }
         const fr = limit ? cfg.makerFeeRate : cfg.feeRate; const eq = equity(tk); let usd = Number(a.usd); if (!Number.isFinite(usd)) { refuse('no size'); continue; }
         usd = Math.min(usd, eq * cfg.maxTradeFractionOfEquity - (adding ? held.costUsd : 0), (state.cashUsd - reservedUsd()) / (1 + fr), !limit && t.askQty > 0 ? t.askQty * t.ask : Infinity);
@@ -546,15 +551,17 @@ export function createSocratesTrader({ dataDir, seriesSource, watch, config = {}
     catch (err) { log(`SOCRATES TRADER album failed (contained): ${clip(err?.message ?? err, 160)}`); }
   }
 
+  let useEffort = true; // v3.4: if the API ever rejects the effort setting, it is dropped (one log line) and he is asked again
+  let answerMax = cfg.maxOutputTokens; // v3.4: grows when an answer is cut off
   function buildBody(userText) {
     const system = [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }];
     if (album?.text) system.push({ type: 'text', text: album.text, cache_control: { type: 'ephemeral' } });
-    return { model: cfg.model, max_tokens: cfg.maxOutputTokens, system, messages: [{ role: 'user', content: [{ type: 'text', text: userText }] }], output_config: { format: { type: 'json_schema', schema: DECISION_SCHEMA } } };
+    return { model: cfg.model, max_tokens: answerMax, system, messages: [{ role: 'user', content: [{ type: 'text', text: userText }] }], output_config: { format: { type: 'json_schema', schema: DECISION_SCHEMA }, ...(cfg.effort && useEffort ? { effort: cfg.effort } : {}) } };
   }
-  const estimateUsd = (body) => { const inTok = Math.ceil(Buffer.byteLength(JSON.stringify(body), 'utf8') / 3); return (inTok * cfg.pricing.cacheWriteUsdPerMTok + cfg.maxOutputTokens * cfg.pricing.outputUsdPerMTok) / 1e6; };
+  const estimateUsd = (body) => { const inTok = Math.ceil(Buffer.byteLength(JSON.stringify(body), 'utf8') / 3); return (inTok * cfg.pricing.cacheWriteUsdPerMTok + body.max_tokens * cfg.pricing.outputUsdPerMTok) / 1e6; };
   const actualUsd = (u) => ((u.input_tokens ?? 0) * cfg.pricing.inputUsdPerMTok + (u.cache_creation_input_tokens ?? 0) * cfg.pricing.cacheWriteUsdPerMTok + (u.cache_read_input_tokens ?? 0) * cfg.pricing.cacheReadUsdPerMTok + (u.output_tokens ?? 0) * cfg.pricing.outputUsdPerMTok) / 1e6;
 
-  async function ask(kind, userText, capUsd) {
+  async function ask(kind, userText, capUsd, retried = false) {
     rollDay(); const body = buildBody(userText); const est = estimateUsd(body);
     if (state.spend.usd + est > capUsd) { journal('BUDGET', { kind, spentUsd: r2(state.spend.usd), capUsd }); return { ok: false, reason: 'BUDGET' }; }
     state.spend.usd += est; state.spend.totalUsd += est; state.spend.calls += 1; saveState(); // reserved before dispatch: a crash never under-counts
@@ -564,6 +571,7 @@ export function createSocratesTrader({ dataDir, seriesSource, watch, config = {}
       j = await res.json();
     } catch (err) { clearTimeout(to); journal('MODEL_ERROR', { kind, error: clip(err?.message ?? err, 160) }); log(`SOCRATES TRADER: model call failed (${clip(err?.message ?? err, 120)}) — the estimate stays counted`); return { ok: false, reason: 'NETWORK' }; }
     clearTimeout(to);
+    if ((!res.ok || j?.type === 'error') && res.status === 400 && useEffort && cfg.effort && /effort/i.test(String(j?.error?.message ?? ''))) { useEffort = false; log('SOCRATES TRADER self-heal: the API rejected the effort setting — asking without it'); if (!retried) return ask(kind, userText, capUsd, true); }
     if (!res.ok || j?.type === 'error') { journal('MODEL_ERROR', { kind, status: res.status, error: clip(j?.error?.message ?? j?.error?.type, 160) }); log(`SOCRATES TRADER: model HTTP ${res.status} ${clip(j?.error?.type ?? '', 60)} ${clip(j?.error?.message ?? '', 140)}`); return { ok: false, reason: `HTTP_${res.status}` }; }
     if (j?.usage) { const act = actualUsd(j.usage); state.spend.usd += act - est; state.spend.totalUsd += act - est; }
     const blocks = Array.isArray(j?.content) ? j.content : []; const text = blocks.filter((b) => b?.type === 'text').map((b) => b.text).join('');
@@ -572,11 +580,17 @@ export function createSocratesTrader({ dataDir, seriesSource, watch, config = {}
     const unusable = (reason) => { const info = { kind, reason, stop, blocks: blocks.map((b) => b?.type).join(','), outTokens: j?.usage?.output_tokens ?? null, text: clip(text, 240) }; journal('MODEL_ERROR', info); log(`SOCRATES TRADER: ${kind} answer unusable (${reason}; stop ${stop ?? '?'}; blocks ${info.blocks || 'none'}; ${info.outTokens ?? '?'} output tokens) "${clip(text, 160)}"`); return { ok: false, reason }; };
     if (stop === 'refusal') return unusable('REFUSAL');
     const decision = parseAnswer(text);
-    if (!decision) return unusable(stop === 'max_tokens' ? 'CUT_OFF_AT_MAX_TOKENS' : 'NOT_JSON');
+    if (!decision) {
+      const cut = stop === 'max_tokens'; const u = unusable(cut ? 'CUT_OFF_AT_MAX_TOKENS' : 'NOT_JSON');
+      // v3.4: a cut-off answer doubles the room (up to the ceiling) and is asked ONCE more at once — a tripwire wake is not thrown away
+      if (cut && answerMax < cfg.maxOutputTokensCeiling) { answerMax = Math.min(cfg.maxOutputTokensCeiling, answerMax * 2); log(`SOCRATES TRADER self-heal: answers were cut off — he now has ${answerMax} output tokens`); if (!retried) return ask(kind, userText, capUsd, true); }
+      return u;
+    }
     if (!Array.isArray(decision.actions)) return unusable('NO_ACTIONS_ARRAY');
     return { ok: true, decision, model: j.model ?? null, usage: j.usage ?? null };
   }
 
+  const range1hOf = (coin) => { const c = seriesSource(coin)?.candles; if (!Array.isArray(c) || !c.length) return null; const since = Math.floor(clock() / 1000) - 3600; const h1 = c.filter((x) => x[0] >= since); if (!h1.length) return null; return (Math.max(...h1.map((x) => x[2])) / Math.min(...h1.map((x) => x[3])) - 1) * 100; };
   const liveChart = (coin, tk, n) => { const txt = chartText(coin, seriesSource(coin), { candlesShown: n, nowTs: clock() }); const t = tk.get(coin); const f = flowText(tape(coin)); return txt ? `${txt}\nlive: bid ${sig(t?.bid)} ask ${sig(t?.ask)} (spread ${t ? r2((t.ask / t.bid - 1) * 100) : '?'}%), $${t ? Math.round(t.askQty * t.ask) : '?'} offered at the ask${f ? `\n${f}` : ''}` : null; };
 
   async function scan(tk, trips = []) {
