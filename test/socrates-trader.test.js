@@ -60,7 +60,16 @@ test('ST-04. the run clock: flat or down at the end -> everything sold and the r
 test('ST-05. the prompt carries the mission, the cage and the hunter; the position cap is 3 (5 while up)', async () => {
   const r = rig({ answers: [ans(buy(30, 0.9))] }); try { await r.t.tick(); assert.equal(Object.keys(r.t.state().positions).length, 1); assert.ok(r.calls[0].messages[0].content[0].text.includes('THE CAGE: window 1')); } finally { r.done(); }
   for (const s of ['LIMIT_BUY rests your bid', 'HALF OFF', 'THE ALBUM', 'THE NOTEBOOK', 'THE TAPE LINE', 'PRESS THE WINNER', 'WHAT A LOSS IS', 'THE FIRST SHAKE', 'REST THE NET', '40% is possible', '15% to 20% in a day', 'hunter, not a gambler', 'THE CAGE (this is real code', 'Lose two windows in a row and the run ends', 'THE TRIPWIRE', 'THE AUTO-TRAIL', 'roomPct', 'THE HISTORY', '228,880', 'DASH on 09-23', 'YOUR OWN PLAYBOOK, TESTED', 'THE GAP IS YOUR JOB', 'you avoid a loss at all costs', 'dead even']) assert.ok(SYSTEM_PROMPT.includes(s), s);
-  assert.equal(TRADER_DEFAULTS.maxPositions, 3); assert.equal(TRADER_DEFAULTS.maxPositionsWhenUp, 5);
+  assert.equal(TRADER_DEFAULTS.maxPositions, 1); assert.equal(TRADER_DEFAULTS.maxPositionsWhenUp, 1); assert.equal(TRADER_DEFAULTS.maxTradeFractionOfEquity, 1); // v3.9 (owner): one position, full size
+});
+
+test('ST-25 (v3.9). full size: a $500 buy on $500 takes all the cash (less the fee); a second buy is refused (one slot); the prompt says FULL SIZE', async () => {
+  const r = rig({ answers: [ans(buy(500, 0.95)), ans(buy(100, 0.95))], tickerExtra: { changePct24h: 40, high24h: 1.2, low24h: 0.7, usd24h: 20_000 * 24 } });
+  try {
+    await r.t.tick(); const p = r.t.state().positions.ABC; assert.ok(p, `the full-size buy is taken: ${r.logs.slice(-3).join(' // ')}`); assert.ok(p.costUsd > 495 && p.costUsd <= 500, `cost ~$496 after the fee, got ${p.costUsd}`); assert.ok(r.t.state().cashUsd < 1, `cash ~0, got ${r.t.state().cashUsd}`);
+    assert.ok(r.calls[0].system[0].text.includes('FULL SIZE (owner, v3.9)'));
+    r.advance(4 * 60_000); await r.t.tick(); assert.equal(Object.keys(r.t.state().positions).length, 1); assert.ok(r.logs.some((l) => l.includes('refused BUY ABC')), r.logs.filter((l) => l.includes('refused')).join(' // '));
+  } finally { r.done(); }
 });
 
 test('ST-06. the chart text carries the bars and the hour summary; the schema forces stop and roomPct on every action', () => {
@@ -71,7 +80,7 @@ test('ST-06. the chart text carries the bars and the hour summary; the schema fo
 
 test('ST-07. the cage: a won window climbs the ladder (faster looks); a 1%+ loss cages him for an hour with no buys; dead even is neutral; two losses in a row end the run', async () => {
   // WON: buy, price rises, window ends above the line
-  const w = rig({ answers: [ans(buy(200, 0.9))] });
+  const w = rig({ answers: [ans(buy(200, 0.95))] });
   try {
     await w.t.tick(); w.book.bid = 1.1; w.book.ask = 1.11; w.advance(H + 1000); await w.t.tick();
     const s = w.t.state(); assert.equal(s.cage.won, 1); assert.equal(s.cage.level, 1); assert.equal(s.cage.window.n, 2); assert.equal(s.cage.lostInARow, 0);
@@ -79,18 +88,19 @@ test('ST-07. the cage: a won window climbs the ladder (faster looks); a 1%+ loss
     assert.ok(w.t.status().cage.lookEveryMs === TRADER_DEFAULTS.lookLadderMs[1]);
   } finally { w.done(); }
   // NEUTRAL: bought, ends within 1% under the line -> not a loss
-  const n = rig({ answers: [ans(buy(100, 0.9))] });
+  const n = rig({ answers: [ans(buy(100, 0.95))] });
   try { await n.t.tick(); n.book.bid = 1.005; n.book.ask = 1.01; n.advance(H + 1000); await n.t.tick(); const s = n.t.state(); assert.equal(s.cage.lost, 0); assert.equal(s.cage.neutral, 1); assert.equal(s.cage.level, 0); assert.ok(n.logs.some((l) => l.includes('window 1 NEUTRAL'))); } finally { n.done(); }
   // LOST then LOST: cage, then the run ends
-  const l = rig({ answers: [ans(buy(200, 0.5)), ans(buy(50, 0.5)), ans(buy(200, 0.5))] });
+  const lesson = { coin: 'ABC', lesson: 'stopped' }; const l = rig({ answers: [ans(buy(200, 0.5)), { ...ans(buy(200, 0.5)), lessons: [lesson] }, { ...ans(buy(200, 0.5)), lessons: [lesson] }, { ...ans(buy(200, 0.5)), lessons: [lesson] }, ans(buy(200, 0.5)), ans(buy(200, 0.5))] }); // v3.8: every 0.5 stop is tightened to 6% under; a $200 position losing 6% is a lost window
   try {
     await l.t.tick(); l.book.bid = 0.9; l.book.ask = 0.91; l.advance(H + 1000); await l.t.tick();
     let s = l.t.state(); assert.equal(s.cage.lost, 1); assert.equal(s.cage.lostInARow, 1); assert.ok(s.cage.pausedUntilTs > 0); assert.equal(s.cage.window, null); assert.ok(l.logs.some((l2) => l2.includes('window 1 LOST')));
     const callsBefore = l.calls.length; l.advance(5 * 60_000); await l.t.tick(); // in the cage: a hold check may run, no movers look, no buys
-    assert.ok(l.calls.length <= callsBefore + 1); assert.equal(Object.keys(l.t.state().positions).length, 1);
+    assert.ok(l.calls.length <= callsBefore + 1); assert.equal(Object.keys(l.t.state().positions).length, 0); // v3.8: the 6% stop cap already cut the loser at 0.94 before the window closed
     l.advance(H); await l.t.tick(); s = l.t.state(); assert.ok(s.cage.window, 'a new window opened after the pause'); assert.equal(s.cage.window.n, 2); assert.ok(l.logs.some((l2) => l2.includes('out of the cage: window 2')));
+    l.advance(4 * 60_000); await l.t.tick(); assert.ok(l.t.state().positions.ABC, `v3.8: he buys again in window 2 (the window-1 loser was already cut by the 6% cap): ${l.logs.slice(-3).join(' // ')}`);
     l.book.bid = 0.8; l.book.ask = 0.81; l.advance(H + 1000); await l.t.tick();
-    s = l.t.state(); assert.equal(s.ended, true); assert.equal(s.endReason, 'CAGED'); assert.deepEqual(s.positions, {}); assert.equal(s.closed.at(-1).reason, 'CAGED');
+    s = l.t.state(); assert.equal(s.ended, true); assert.equal(s.endReason, 'CAGED'); assert.deepEqual(s.positions, {}); assert.equal(s.closed.at(-1).reason, 'STOP'); // v3.8: the 6% cap stops the loser before the window closes; the run still ends CAGED
   } finally { l.done(); }
 });
 
@@ -115,10 +125,10 @@ test('ST-08. the tripwire: a 2%+ jump over the last closed minute with a calm cr
 });
 
 test('ST-09. the auto-trail: +3% locks break-even after fees, +6% trails 5% under the high; a stop is never lowered (MOVE_STOP down is refused)', async () => {
-  const r = rig({ answers: [ans(buy(100, 0.9)), ans({ type: 'MOVE_STOP', coin: 'ABC', usd: null, stop: 0.95, roomPct: null, strategy: 'OTHER', why: 'lower it' })] });
+  const r = rig({ config: { takeAllAtPct: 0 }, answers: [ans(buy(100, 0.95)), ans({ type: 'MOVE_STOP', coin: 'ABC', usd: null, stop: 0.93, roomPct: null, strategy: 'OTHER', why: 'lower it' })] });
   try {
-    await r.t.tick(); const p = () => r.t.state().positions.ABC; assert.equal(p().stop, 0.9);
-    r.book.bid = 1.02; r.advance(15_000); await r.t.tick(); assert.equal(p().stop, 0.9, 'under +3%: untouched');
+    await r.t.tick(); const p = () => r.t.state().positions.ABC; assert.equal(p().stop, 0.95);
+    r.book.bid = 1.02; r.advance(15_000); await r.t.tick(); assert.equal(p().stop, 0.95, 'under +3%: untouched');
     r.book.bid = 1.045; r.advance(15_000); await r.t.tick(); const be = 1.01 * (1 + 0.016 + 0.002); assert.ok(Math.abs(p().stop - be) < 1e-9, 'break-even after fees locked');
     r.book.bid = 1.10; r.advance(15_000); await r.t.tick(); assert.ok(Math.abs(p().stop - 1.10 * 0.95) < 1e-9, 'trails 5% under the high');
     r.book.bid = 1.07; r.advance(15_000); await r.t.tick(); assert.ok(Math.abs(p().stop - 1.10 * 0.95) < 1e-9, 'the high stands: the stop never drops');
@@ -152,7 +162,7 @@ test('ST-10. limit orders: rest under the bid, fill ONLY when the price trades t
 });
 
 test('ST-11. half off at +4% as a maker sell, the rest rides; one trade is counted once and one lesson is owed; the lesson lands in the notebook and is shown back', async () => {
-  const r = rig({ answers: [ans(buy(200, 0.95)), { actions: [], note: 'x', lessons: [{ coin: 'ABC', lesson: 'Half off paid; the trail took the rest at break-even plus. Keep the stop under the swing low.' }] }] });
+  const r = rig({ config: { takeAllAtPct: 0 }, answers: [ans(buy(200, 0.95)), { actions: [], note: 'x', lessons: [{ coin: 'ABC', lesson: 'Half off paid; the trail took the rest at break-even plus. Keep the stop under the swing low.' }] }] });
   try {
     await r.t.tick(); r.book.bid = 1.06; r.book.ask = 1.07; r.advance(15_000); await r.t.tick();
     let s = r.t.state(); const half = s.closed.at(-1); assert.equal(half.part, 'HALF'); assert.equal(half.reason, 'HALF_OFF'); assert.equal(half.exitPx, 1.01 * 1.04);
@@ -216,7 +226,7 @@ test('ST-15 (v3.2). an unusable answer is LOUD: cut off at max_tokens, not JSON,
 
 test('ST-16 (v3.3). press the winner: an add on a held coin is refused until it is up 4% with break-even locked, then fills as a market add that averages the cost and may raise the stop', async () => {
   const L = TRADER_DEFAULTS.lookLadderMs[0];
-  const r = rig({ answers: [ans(buy(100, 0.9)), ans(), ans(buy(100, 0.9, { why: 'press too early' })), ans(), ans(buy(100, 1.0, { why: 'press the winner' }))] });
+  const r = rig({ config: { takeAllAtPct: 0 }, answers: [ans(buy(100, 0.9)), ans(), ans(buy(100, 0.9, { why: 'press too early' })), ans(), ans(buy(100, 1.0, { why: 'press the winner' }))] });
   try {
     await r.t.tick(); assert.equal(r.t.state().positions.ABC.costUsd, 100);        // t=0 scan: buy
     r.advance(125_000); await r.t.tick();                                            // t=125s hold check (empty)
@@ -337,5 +347,29 @@ test('ST-23 (v3.7). fresh momentum: a buy on a coin that is down over the hour i
   // no 24h volume on the ticker: volume is not judged; the hour is up, so it buys
   const unknown = rig({ answers: [ans(buy(100, 0.95))], tickerExtra: { changePct24h: 40, high24h: 1.2, low24h: 0.7 } });
   try { await unknown.t.tick(); assert.ok(unknown.t.state().positions.ABC); } finally { unknown.done(); }
-  assert.deepEqual(TRADER_DEFAULTS.freshMomentum, { minRet1hPct: 0, minVolX: 2 });
+  assert.deepEqual(TRADER_DEFAULTS.freshMomentum, { minRet1hPct: 0, minVolX: 3, maxRet1hPct: 6 });
+});
+
+test('ST-24 (v3.8). the late-chase cap and the stop cap: a coin already up more than 6% over the hour is refused; a stop wider than 6% under is tightened to 6%, not refused; a 5% stop is kept', async () => {
+  // up ~8.7% over the hour (oldest candle opens at 0.92), fresh money 3x: refused as a LATE CHASE
+  const late = (() => { const dir = mkdtempSync(path.join(os.tmpdir(), 'soc-v38-')); const now = Date.UTC(2026, 8, 30, 15); const c = []; for (let i = 60; i > 0; i -= 1) c.push([Math.floor(now / 60000) * 60 - i * 60, i === 60 ? 0.92 : 1, 1.02, 0.99, 1, 1000]); const logs = []; const fetchImpl = async () => ({ ok: true, status: 200, json: async () => ({ type: 'message', stop_reason: 'end_turn', content: [{ type: 'text', text: JSON.stringify(ans(buy(100, 0.95))) }], usage: { input_tokens: 10, output_tokens: 50 } }) }); const t = createSocratesTrader({ dataDir: dir, seriesSource: (x) => (x === 'ABC' ? { candles: c } : null), watch: { current: () => ({ picks: [{ coin: 'ABC' }] }) }, config: { enabled: true }, env: { ANTHROPIC_API_KEY: 'k' }, log: (l) => logs.push(l), fetchImpl, clock: () => now, readTickersImpl: () => new Map([['ABC', { bid: 1, ask: 1.01, bidQty: 1e5, askQty: 1e5, ts: now, changePct24h: 40, high24h: 1.2, low24h: 0.7, usd24h: 20_000 * 24 }]]) }); return { t, logs, done: () => rmSync(dir, { recursive: true, force: true }) }; })();
+  try { await late.t.tick(); assert.ok(!late.t.state().positions.ABC, 'a late chase is refused'); assert.ok(late.logs.some((l) => l.includes('LATE CHASE — already +8.7% over the last hour')), late.logs.filter((l) => l.includes('refused')).join(' // ')); } finally { late.done(); }
+  // a 10% stop on a normal buy is tightened to 6% under the bid (0.94), and the buy goes through
+  const wide = rig({ answers: [ans(buy(100, 0.90))], tickerExtra: { changePct24h: 40, high24h: 1.2, low24h: 0.7, usd24h: 20_000 * 24 } });
+  try { await wide.t.tick(); const p = wide.t.state().positions.ABC; assert.ok(p, `the buy is taken: ${wide.logs.slice(-3).join(' // ')}`); assert.ok(Math.abs(p.stop - 0.94) < 1e-9, `stop tightened to 0.94, got ${p.stop}`); assert.ok(wide.logs.some((l) => l.includes('stop tightened ABC'))); } finally { wide.done(); }
+  // a 5% stop is inside the cap and above the floor: kept as given
+  const ok = rig({ answers: [ans(buy(100, 0.95))], tickerExtra: { changePct24h: 40, high24h: 1.2, low24h: 0.7, usd24h: 20_000 * 24 } });
+  try { await ok.t.tick(); const p = ok.t.state().positions.ABC; assert.ok(p); assert.ok(Math.abs(p.stop - 0.95) < 1e-9); } finally { ok.done(); }
+  assert.deepEqual(TRADER_DEFAULTS.stopFloor, { fractionOfRange1h: 0.4, minPct: 2.5, maxPct: 6 });
+});
+
+test('ST-26 (v4.0). the target: at +4% the WHOLE position is sold as a resting maker sell; one closed trade, reason TARGET; the prompt says THE TARGET', async () => {
+  const r = rig({ answers: [ans(buy(500, 0.95))], tickerExtra: { changePct24h: 40, high24h: 1.2, low24h: 0.7, usd24h: 20_000 * 24 } });
+  try {
+    await r.t.tick(); assert.ok(r.t.state().positions.ABC); assert.ok(r.calls[0].system[0].text.includes('THE TARGET (v4.0)'));
+    r.book.bid = 1.02; r.advance(15_000); await r.t.tick(); assert.ok(r.t.state().positions.ABC, 'under +4%: still held');
+    r.book.bid = 1.06; r.advance(15_000); await r.t.tick(); assert.ok(!r.t.state().positions.ABC, 'sold at the target');
+    const c = r.t.state().closed.at(-1); assert.equal(c.reason, 'TARGET'); assert.ok(Math.abs(c.exitPx - 1.01 * 1.04) < 1e-9, `exit at +4% over 1.01, got ${c.exitPx}`); assert.equal(r.t.state().trades, 1); assert.ok(c.pnlUsd > 0);
+  } finally { r.done(); }
+  assert.equal(TRADER_DEFAULTS.takeAllAtPct, 4);
 });
