@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#030612">
+<title>Socrates</title>
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<style>
+/* SOCRATES — a read-only page for the phone. It only reads the trader's own files; it cannot trade or change anything. */
+:root{--bg:#030612;--fg:#e8edf5;--muted:#8d99ad;--line:#1b2436;--card:#0a1020;--up:#39d98a;--down:#ff6b6b;--flat:#c9d1e0;--font:system-ui,-apple-system,"Segoe UI",sans-serif;color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:17px/1.45 var(--font);padding:14px 16px calc(24px + env(safe-area-inset-bottom))}
+main{max-width:640px;margin:0 auto;display:grid;gap:12px}
+h1{font-size:20px;margin:0;display:flex;justify-content:space-between;align-items:baseline;gap:8px}
+h1 small{font-size:13px;color:var(--muted);font-weight:400}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
+.big{font-size:38px;font-weight:800;line-height:1.1;letter-spacing:-0.5px}
+.up{color:var(--up)}.down{color:var(--down)}.flat{color:var(--flat)}
+.row{display:flex;justify-content:space-between;gap:10px;padding:6px 0;border-top:1px solid var(--line)}
+.row:first-child{border-top:0}
+.k{color:var(--muted)}
+.v{text-align:right;font-variant-numeric:tabular-nums}
+h2{font-size:14px;color:var(--muted);margin:0 0 6px;text-transform:uppercase;letter-spacing:.06em}
+.trade{padding:8px 0;border-top:1px solid var(--line)}
+.trade:first-of-type{border-top:0}
+.trade .l1{display:flex;justify-content:space-between;font-weight:700}
+.trade .l2{color:var(--muted);font-size:14px}
+.look{padding:8px 0;border-top:1px solid var(--line);font-size:15px}
+.look:first-of-type{border-top:0}
+.look .t{color:var(--muted);font-size:13px}
+.empty{color:var(--muted)}
+#err{color:var(--down);display:none}
+a{color:var(--fg)}
+.foot{color:var(--muted);font-size:13px;text-align:center}
+</style>
+</head>
+<body>
+<main>
+<h1>Socrates <small id="asof">loading…</small></h1>
+<div id="err" class="card">The page could not read the trader. Pull down to refresh.</div>
+<section class="card">
+  <div id="equity" class="big flat">$—</div>
+  <div id="ret" class="k">since the start</div>
+  <div class="row"><span class="k">Cash</span><span class="v" id="cash">—</span></div>
+  <div class="row"><span class="k">Closed trades</span><span class="v" id="trades">—</span></div>
+  <div class="row"><span class="k">Windows</span><span class="v" id="windows">—</span></div>
+  <div class="row"><span class="k">Model spend today</span><span class="v" id="spend">—</span></div>
+  <div class="row"><span class="k">Ledger</span><span class="v" id="build">—</span></div>
+</section>
+<section class="card"><h2>Holding now</h2><div id="holding" class="empty">nothing</div></section>
+<section class="card"><h2>Resting order</h2><div id="orders" class="empty">none</div></section>
+<section class="card"><h2>Trades today</h2><div id="today" class="empty">none yet</div></section>
+<section class="card"><h2>Earlier trades</h2><div id="earlier" class="empty">none</div></section>
+<section class="card"><h2>His last looks</h2><div id="looks" class="empty">none yet</div></section>
+<div class="foot">Read-only. Refreshes every 30 seconds. Times are your phone's local time.</div>
+</main>
+<script>
+(function () {
+  const $ = (id) => document.getElementById(id);
+  const money = (n) => (n == null || !isFinite(n)) ? '—' : (n < 0 ? '-$' : '$') + Math.abs(n).toFixed(2);
+  const pct = (n) => (n == null || !isFinite(n)) ? '—' : (n > 0 ? '+' : '') + n.toFixed(2) + '%';
+  const cls = (n) => n > 0 ? 'up' : n < 0 ? 'down' : 'flat';
+  const when = (ts) => { const d = new Date(ts); return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) + ' ' + d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }); };
+  const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const sameDay = (a, b) => { const x = new Date(a), y = new Date(b); return x.getFullYear() === y.getFullYear() && x.getMonth() === y.getMonth() && x.getDate() === y.getDate(); };
+  function trade(t) {
+    const reason = ({ TARGET: 'hit the +4% target', STOP: 'stopped out', DECISION: 'he sold', HALF_OFF: 'half off at +4%', CAGED: 'caged', EXPERIMENT_END: 'run ended' })[t.reason] || t.reason;
+    return '<div class="trade"><div class="l1"><span>' + esc(t.coin) + ' <span class="' + cls(t.pnlUsd) + '">' + money(t.pnlUsd) + ' (' + pct(t.pnlPct) + ')</span></span><span class="' + cls(t.pnlUsd) + '">' + (t.pnlUsd > 0 ? 'WIN' : t.pnlUsd < 0 ? 'LOSS' : 'EVEN') + '</span></div>'
+      + '<div class="l2">' + when(t.ts) + ' · bought ' + esc(t.entryPx) + ' → sold ' + esc(t.exitPx) + ' · ' + esc(t.heldMin) + ' min · ' + esc(reason) + (t.part === 'HALF' ? ' (half)' : '') + '</div>'
+      + (t.why ? '<div class="l2">' + esc(t.why) + '</div>' : '') + '</div>';
+  }
+  function render(d) {
+    $('err').style.display = 'none';
+    const s = d.status || {};
+    $('asof').textContent = s.asOfTs ? 'as of ' + when(s.asOfTs) : 'no status yet';
+    $('equity').textContent = money(s.equityUsd); $('equity').className = 'big ' + cls(s.returnPct);
+    $('ret').textContent = pct(s.returnPct) + ' since the start' + (s.ended ? ' — RUN ENDED (' + esc(s.endReason) + ')' : '');
+    $('cash').textContent = money(s.cashUsd);
+    $('trades').textContent = (s.trades ?? 0) + ' (' + (s.wins ?? 0) + ' won)';
+    const c = s.cage || {}; $('windows').textContent = 'won ' + (c.won ?? 0) + ' · lost ' + (c.lost ?? 0) + ' · neutral ' + (c.neutral ?? 0) + (c.caged ? ' · IN THE CAGE' : '');
+    $('spend').textContent = money(s.spend?.todayUsd) + ' of ' + money(s.spend?.capPerDayUsd);
+    $('build').textContent = d.build || s.version || '—';
+    const pos = Object.entries(s.positions || {});
+    $('holding').innerHTML = pos.length ? pos.map(([coin, p]) => { const live = d.bids?.[coin]; const pnl = live ? ((p.qty * live * 0.992) / (p.costUsd + p.entryFeeUsd) - 1) * 100 : null; return '<div class="trade"><div class="l1"><span>' + esc(coin) + ' ' + money(p.costUsd) + '</span><span class="' + cls(pnl ?? 0) + '">' + (pnl == null ? '' : pct(pnl)) + '</span></div><div class="l2">bought ' + esc(p.entryPx) + ' at ' + when(p.entryTs) + ' · stop ' + esc(p.stop) + (live ? ' · now ' + esc(live) : '') + '</div>' + (p.why ? '<div class="l2">' + esc(p.why) + '</div>' : '') + '</div>'; }).join('') : '<span class="empty">nothing</span>';
+    const ord = Object.entries(s.orders || {});
+    $('orders').innerHTML = ord.length ? ord.map(([coin, o]) => '<div class="trade"><div class="l1"><span>' + esc(coin) + ' ' + money(o.usd) + '</span><span>at ' + esc(o.price) + '</span></div><div class="l2">placed ' + when(o.placedTs) + ' · stop ' + esc(o.stop) + ' · expires ' + when(o.expiresTs) + '</div></div>').join('') : '<span class="empty">none</span>';
+    const sells = (d.sells || []).slice().reverse(); const now = Date.now();
+    const today = sells.filter((t) => sameDay(t.ts, now)); const earlier = sells.filter((t) => !sameDay(t.ts, now));
+    $('today').innerHTML = today.length ? today.map(trade).join('') : '<span class="empty">none yet</span>';
+    $('earlier').innerHTML = earlier.length ? earlier.slice(0, 20).map(trade).join('') : '<span class="empty">none</span>';
+    const looks = (d.decisions || []).slice().reverse().slice(0, 12);
+    $('looks').innerHTML = looks.length ? looks.map((x) => { const acts = (x.results || []).map((r) => r.refused ? 'refused ' + esc(r.type) + ' ' + esc(r.coin) + ' — ' + esc(r.refused) : esc(r.type) + ' ' + esc(r.coin)).join(' · '); return '<div class="look"><div class="t">' + when(x.ts) + ' · ' + esc(({ SCAN: 'look', TRIP: 'tripwire', HOLD: 'holding check' })[x.kind] || x.kind) + (x.tripped?.length ? ' ' + esc(x.tripped.join(' ')) : '') + (x.pocket?.length ? ' · pocket ' + esc(x.pocket.join(' ')) : '') + '</div><div>' + esc(x.note || '') + '</div>' + (acts ? '<div class="t">' + acts + '</div>' : '') + '</div>'; }).join('') : '<span class="empty">none yet</span>';
+  }
+  async function load() {
+    try { const r = await fetch('/api/socrates', { cache: 'no-store' }); if (!r.ok) throw new Error(String(r.status)); render(await r.json()); }
+    catch (e) { $('err').style.display = 'block'; }
+  }
+  load(); setInterval(load, 30000);
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') load(); });
+})();
+</script>
+</body>
+</html>

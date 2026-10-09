@@ -145,6 +145,27 @@ async function askJournalPage({ limit }) { if (!judgeRun || !judgeRun.journal ||
 // half reads the research service's own budget journal totals (reserved + settled today = runtime.budget.dayUsd) out of
 // its status FILE — the UI never imports socrates/ (B08), the number flows in over the same bounded status read the rest
 // of the market-lab view uses, and stays 0 when the service is not running or has not written a status yet.
+// SOCRATES PAGE (owner, 2026-10-09: 'so I don't have to bother you every time I want to know'): a read-only view of the
+// Socrates trader's OWN files — <data>/socrates-trader/status.json (his snapshot) and the tail of trades.jsonl (his
+// journal). The UI still never imports experiment/ or socrates/ (B08); it reads files, bounded, and renders. It cannot
+// trade, cancel, or change a stop: there is no POST. The live bid for a held coin comes from the broad-Kraken snapshot.
+const SOCRATES_TAIL_BYTES = 512 * 1024;
+function socratesTraderDir() { return path.join(dataDir(), 'socrates-trader'); }
+function readJsonlTail(file, maxBytes) {
+  try { const buf = readFs(file); const slice = buf.length > maxBytes ? buf.subarray(buf.length - maxBytes) : buf; let txt = slice.toString('utf8'); if (buf.length > maxBytes) txt = txt.slice(txt.indexOf('\n') + 1); const out = []; for (const line of txt.split('\n')) { if (!line.trim()) continue; try { out.push(JSON.parse(line)); } catch { /* a torn line */ } } return out; } catch { return []; }
+}
+function socratesLiveBids(coins) {
+  const out = {}; if (!coins.length) return out;
+  try { const snap = readJsonBounded(path.join(dataDir(), 'broad-kraken', 'latest.json')); const recs = snap?.records && typeof snap.records === 'object' ? snap.records : {}; for (const coin of coins) { const b = Number(recs[coin]?.ticker?.payload?.bid); if (Number.isFinite(b) && b > 0) out[coin] = b; } } catch { /* no snapshot: no live bid */ }
+  return out;
+}
+function socratesView() {
+  const dir = socratesTraderDir(); const status = readJsonBounded(path.join(dir, 'status.json'));
+  const rows = readJsonlTail(path.join(dir, 'trades.jsonl'), SOCRATES_TAIL_BYTES);
+  const pick = (kind, n) => rows.filter((r) => r.kind === kind).slice(-n);
+  const build = status?.version ?? null;
+  return { asOf: nowIso(), build, status, bids: socratesLiveBids(Object.keys(status?.positions ?? {})), sells: pick('SELL', 60), buys: [...pick('BUY', 30), ...pick('FILL', 30)].sort((a, b) => a.ts - b.ts).slice(-30), decisions: rows.filter((r) => r.kind === 'SCAN' || r.kind === 'TRIP' || r.kind === 'HOLD').slice(-30) /* journal('DECISION', { kind }) stores the look's kind */, windows: pick('WINDOW', 48) };
+}
 function socratesSpendUsdToday() { try { const st = readJsonBounded(path.join(marketResearchRoot(), 'status.json')); const v = Number(st?.runtime?.budget?.dayUsd); return Number.isFinite(v) && v > 0 ? v : 0; } catch { return 0; } }
 function explainerView() { let talkUsd = 0; try { talkUsd = Number(chat().status()?.spend?.spentUsd) || 0; } catch { talkUsd = 0; } try { return explainerControlsView({ dataDir: dataDir(), env: process.env, spend: { talkUsd, socratesUsd: socratesSpendUsdToday() } }); } catch { return null; } }
 // PUBLISH-FIX-84: the plain sentence naming what keeps the free-form answer off lives in paper/companion.js (askWhyNotChatText);
@@ -822,6 +843,12 @@ const server = http.createServer((req, res) => {
     if (url.pathname === '/' || url.pathname === '/index.html') {
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
       res.end(readFileSync(path.join(UI_DIR, 'index.html')));
+    } else if (url.pathname === '/socrates' || url.pathname === '/socrates.html') {
+      // the Socrates page: read-only, behind the same platform password as everything else
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+      res.end(readFileSync(path.join(UI_DIR, 'socrates.html')));
+    } else if (url.pathname === '/api/socrates') {
+      json(res, 200, socratesView());
     } else if (url.pathname === '/api/ears') {
       // UI-1A: the rumor room — bounded, read-only, nulls stay null
       try {
