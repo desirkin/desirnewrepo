@@ -8,6 +8,9 @@ import path from 'node:path';
 import { createSocratesTrader, chartText, tripwireCheck, buildAlbum, tapeFacts, flowText, parseAnswer, SYSTEM_PROMPT, DECISION_SCHEMA, TRADER_DEFAULTS } from '../experiment/socrates-trader.js';
 
 const H = 3600_000;
+// v4.2 made the defaults strict (LIMIT only, no SELL by decision, 4 h time limit). The mechanics tests below switch those off so
+// they can exercise market fills, decision sells and long holds; ST-29 tests the v4.2 defaults themselves.
+const LEGACY = { limitOnly: false, noSellMinutes: 0, maxHoldHours: 0, freshHigh: { withinPct: 100 }, dayShift: { startUtc: 13, endUtc: 21 }, freshMomentum: { minRet1hPct: 0, minVolX: 3, maxRet1hPct: 6 } }; // v4.3 added the fresh-high gate and the 15-18 UTC hunting hours; ST-30 tests those
 function rig({ answers = [], bid = 1.0, ask = 1.01, key = 'k', config = {}, tapeSnap = null, lows = null, tickerExtra = {} } = {}) {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'soc-trader-')); let now = Date.UTC(2026, 8, 30, 15, 0, 0);
   const extra = []; // candles appended after start (openSec, low) to test limit fills
@@ -20,7 +23,7 @@ function rig({ answers = [], bid = 1.0, ask = 1.01, key = 'k', config = {}, tape
   const calls = []; const queue = [...answers];
   const fetchImpl = async (url, init) => { const b = JSON.parse(init.body); calls.push(b); const a = queue.shift() ?? { actions: [], note: 'wait' }; return { ok: true, status: 200, json: async () => ({ type: 'message', model: 'claude-sonnet-5', content: [{ type: 'text', text: JSON.stringify(a) }], usage: { input_tokens: 3000, output_tokens: 200, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } }) }; };
   const logs = [];
-  const t = createSocratesTrader({ dataDir: dir, seriesSource: series, watch, config: { enabled: true, ...config }, env: key ? { ANTHROPIC_API_KEY: key } : {}, log: (l) => logs.push(l), fetchImpl, clock: () => now, readTickersImpl: tickers, tapeSnapshot: (coin) => (coin === 'ABC' && tapeSnap ? { ...tapeSnap, tsMs: now - 5000 } : null) });
+  const t = createSocratesTrader({ dataDir: dir, seriesSource: series, watch, config: { enabled: true, ...LEGACY, ...config }, env: key ? { ANTHROPIC_API_KEY: key } : {}, log: (l) => logs.push(l), fetchImpl, clock: () => now, readTickersImpl: tickers, tapeSnapshot: (coin) => (coin === 'ABC' && tapeSnap ? { ...tapeSnap, tsMs: now - 5000 } : null) });
   return { t, dir, calls, logs, book, extra, now: () => now, advance: (ms) => { now += ms; }, done: () => rmSync(dir, { recursive: true, force: true }) };
 }
 const buy = (usd, stop, extra = {}) => ({ type: 'BUY', coin: 'ABC', usd, price: null, stop, roomPct: 8, strategy: 'ABSORPTION_RECLAIM', why: 'runner', ...extra });
@@ -58,7 +61,7 @@ test('ST-04. the run clock: flat or down at the end -> everything sold and the r
 });
 
 test('ST-05. the prompt carries the mission, the cage and the hunter; the position cap is 3 (5 while up)', async () => {
-  const r = rig({ answers: [ans(buy(30, 0.9))] }); try { await r.t.tick(); assert.equal(Object.keys(r.t.state().positions).length, 1); assert.ok(r.calls[0].messages[0].content[0].text.includes('THE CAGE: window 1')); } finally { r.done(); }
+  const r = rig({ answers: [ans(buy(150, 0.95))] }); try { await r.t.tick(); assert.equal(Object.keys(r.t.state().positions).length, 1); assert.ok(r.calls[0].messages[0].content[0].text.includes('THE CAGE: window 1')); } finally { r.done(); }
   for (const s of ['LIMIT_BUY rests your bid', 'HALF OFF', 'THE ALBUM', 'THE NOTEBOOK', 'THE TAPE LINE', 'PRESS THE WINNER', 'WHAT A LOSS IS', 'THE FIRST SHAKE', 'REST THE NET', '40% is possible', '15% to 20% in a day', 'hunter, not a gambler', 'THE CAGE (this is real code', 'Lose two windows in a row and the run ends', 'THE TRIPWIRE', 'THE AUTO-TRAIL', 'roomPct', 'THE HISTORY', '228,880', 'DASH on 09-23', 'YOUR OWN PLAYBOOK, TESTED', 'THE GAP IS YOUR JOB', 'you avoid a loss at all costs', 'dead even']) assert.ok(SYSTEM_PROMPT.includes(s), s);
   assert.equal(TRADER_DEFAULTS.maxPositions, 1); assert.equal(TRADER_DEFAULTS.maxPositionsWhenUp, 1); assert.equal(TRADER_DEFAULTS.maxTradeFractionOfEquity, 1); // v3.9 (owner): one position, full size
 });
@@ -214,7 +217,7 @@ test('ST-15 (v3.2). an unusable answer is LOUD: cut off at max_tokens, not JSON,
   assert.deepEqual(parseAnswer('Sure. {"actions":[],"note":"n","lessons":[]} Done.').actions, []);
   assert.equal(parseAnswer('{"actions":[{"type":"BUY","coin":"AB'), null);
   const raw = (body) => async () => ({ ok: true, status: 200, json: async () => body });
-  const mk = (body) => { const dir = mkdtempSync(path.join(os.tmpdir(), 'soc-v32-')); const now = Date.UTC(2026, 8, 30, 15); const c = []; for (let i = 60; i > 0; i -= 1) c.push([Math.floor(now / 60000) * 60 - i * 60, i === 60 ? 0.995 : 1, 1.02, 0.99, 1, 1000]); const logs = []; const t = createSocratesTrader({ dataDir: dir, seriesSource: (x) => (x === 'ABC' ? { candles: c } : null), watch: { current: () => ({ picks: [{ coin: 'ABC' }] }) }, config: { enabled: true }, env: { ANTHROPIC_API_KEY: 'k' }, log: (l) => logs.push(l), fetchImpl: raw(body), clock: () => now, readTickersImpl: () => new Map([['ABC', { bid: 1, ask: 1.01, bidQty: 1e5, askQty: 1e5, ts: now }]]) }); return { t, logs, done: () => rmSync(dir, { recursive: true, force: true }) }; };
+  const mk = (body) => { const dir = mkdtempSync(path.join(os.tmpdir(), 'soc-v32-')); const now = Date.UTC(2026, 8, 30, 15); const c = []; for (let i = 60; i > 0; i -= 1) c.push([Math.floor(now / 60000) * 60 - i * 60, i === 60 ? 0.995 : 1, 1.02, 0.99, 1, 1000]); const logs = []; const t = createSocratesTrader({ dataDir: dir, seriesSource: (x) => (x === 'ABC' ? { candles: c } : null), watch: { current: () => ({ picks: [{ coin: 'ABC' }] }) }, config: { enabled: true, ...LEGACY }, env: { ANTHROPIC_API_KEY: 'k' }, log: (l) => logs.push(l), fetchImpl: raw(body), clock: () => now, readTickersImpl: () => new Map([['ABC', { bid: 1, ask: 1.01, bidQty: 1e5, askQty: 1e5, ts: now }]]) }); return { t, logs, done: () => rmSync(dir, { recursive: true, force: true }) }; };
   const cut = mk({ type: 'message', stop_reason: 'max_tokens', content: [{ type: 'text', text: '{"actions":[{"type":"BUY","coin":"AB' }], usage: { input_tokens: 10, output_tokens: 4000 } });
   try { await cut.t.tick(); assert.ok(cut.logs.some((l) => l.includes('SCAN answer unusable (CUT_OFF_AT_MAX_TOKENS; stop max_tokens; blocks text; 4000 output tokens)'))); } finally { cut.done(); }
   const ref = mk({ type: 'message', stop_reason: 'refusal', content: [], usage: { input_tokens: 10, output_tokens: 0 } });
@@ -252,7 +255,7 @@ test('ST-17 (v3.3). the pocket scan finds wild + just-dipped + liquid coins acro
   const series = { WD: { candles: wildDip }, WU: { candles: wildUp }, CALM: { candles: calm }, DUST: { candles: dust } };
   const out = pocketScan({ coins: Object.keys(series), seriesSource: (c) => series[c], ticker: () => ({ bid: 1 }), nowTs: now, cfg: TRADER_DEFAULTS.pocket });
   assert.deepEqual(out.map((x) => x.coin), ['WD']); assert.ok(out[0].dipPct < 0); assert.ok(out[0].range1hPct >= 7);
-  const r = rig({}); try { r.t; const src = (coin) => (coin === 'ABC' ? { candles: wildDip.map((b) => [b[0] + 0, ...b.slice(1)]) } : null); src.coins = () => ['ABC']; const dir = r.dir; const logs = []; let nowTs = now; const t = createSocratesTrader({ dataDir: dir + '-p', seriesSource: src, watch: { current: () => ({ picks: [] }) }, config: { enabled: true }, env: { ANTHROPIC_API_KEY: 'k' }, log: (l) => logs.push(l), fetchImpl: async (u, i) => { logs.push('BODY ' + JSON.parse(i.body).messages[0].content[0].text.slice(0, 2000)); return { ok: true, status: 200, json: async () => ({ content: [{ type: 'text', text: '{"actions":[],"note":"n","lessons":[]}' }], usage: {} }) }; }, clock: () => nowTs, readTickersImpl: () => new Map([['ABC', { bid: 1, ask: 1.01, bidQty: 1e5, askQty: 1e5, ts: nowTs }]]) }); await t.tick(); assert.ok(logs.some((l) => l.includes('ABC: POCKET — 1h range')), 'the pocket line is in the message'); assert.ok(logs.some((l) => l.includes('look (1 pocket [ABC], 0 movers)'))); rmSync(dir + '-p', { recursive: true, force: true }); } finally { r.done(); }
+  const r = rig({}); try { r.t; const src = (coin) => (coin === 'ABC' ? { candles: wildDip.map((b) => [b[0] + 0, ...b.slice(1)]) } : null); src.coins = () => ['ABC']; const dir = r.dir; const logs = []; let nowTs = now; const t = createSocratesTrader({ dataDir: dir + '-p', seriesSource: src, watch: { current: () => ({ picks: [] }) }, config: { enabled: true, ...LEGACY }, env: { ANTHROPIC_API_KEY: 'k' }, log: (l) => logs.push(l), fetchImpl: async (u, i) => { logs.push('BODY ' + JSON.parse(i.body).messages[0].content[0].text.slice(0, 2000)); return { ok: true, status: 200, json: async () => ({ content: [{ type: 'text', text: '{"actions":[],"note":"n","lessons":[]}' }], usage: {} }) }; }, clock: () => nowTs, readTickersImpl: () => new Map([['ABC', { bid: 1, ask: 1.01, bidQty: 1e5, askQty: 1e5, ts: nowTs }]]) }); await t.tick(); assert.ok(logs.some((l) => l.includes('ABC: POCKET — 1h range')), 'the pocket line is in the message'); assert.ok(logs.some((l) => l.includes('look (1 pocket [ABC], 0 movers)'))); rmSync(dir + '-p', { recursive: true, force: true }); } finally { r.done(); }
 });
 
 test('ST-18 (v3.4). his thinking no longer eats the answer: effort medium + 8000 tokens; a cut-off doubles the room and asks ONCE more at once, and that answer trades', async () => {
@@ -264,7 +267,7 @@ test('ST-18 (v3.4). his thinking no longer eats the answer: effort medium + 8000
     { type: 'message', stop_reason: 'end_turn', content: [{ type: 'text', text: '{"actions":[{"type":"BUY","coin":"ABC","usd":100,"price":null,"stop":0.95,"roomPct":8,"strategy":"OTHER","why":"x"}],"note":"n","lessons":[]}' }], usage: { input_tokens: 10, output_tokens: 300 } },
   ];
   const fetchImpl = async (_u, init) => { bodies.push(JSON.parse(init.body)); const b = answers[Math.min(bodies.length - 1, answers.length - 1)]; return { ok: true, status: 200, json: async () => b }; };
-  const t = createSocratesTrader({ dataDir: dir, seriesSource: (x) => (x === 'ABC' ? { candles: c } : null), watch: { current: () => ({ picks: [{ coin: 'ABC' }] }) }, config: { enabled: true }, env: { ANTHROPIC_API_KEY: 'k' }, log: (l) => logs.push(l), fetchImpl, clock: () => now, readTickersImpl: () => new Map([['ABC', { bid: 1, ask: 1.01, bidQty: 1e5, askQty: 1e5, ts: now }]]) });
+  const t = createSocratesTrader({ dataDir: dir, seriesSource: (x) => (x === 'ABC' ? { candles: c } : null), watch: { current: () => ({ picks: [{ coin: 'ABC' }] }) }, config: { enabled: true, ...LEGACY }, env: { ANTHROPIC_API_KEY: 'k' }, log: (l) => logs.push(l), fetchImpl, clock: () => now, readTickersImpl: () => new Map([['ABC', { bid: 1, ask: 1.01, bidQty: 1e5, askQty: 1e5, ts: now }]]) });
   try {
     await t.tick();
     assert.equal(bodies.length, 2, 'cut off once, asked once more');
@@ -280,7 +283,7 @@ test('ST-19 (v3.4). if the API rejects the effort setting he is asked again with
   for (let i = 60; i > 0; i -= 1) c.push([Math.floor(now / 60000) * 60 - i * 60, i === 60 ? 0.995 : 1, 1.02, 0.99, 1, 1000]);
   const bodies = []; const logs = [];
   const fetchImpl = async (_u, init) => { const b = JSON.parse(init.body); bodies.push(b); if (b.output_config.effort) return { ok: false, status: 400, json: async () => ({ type: 'error', error: { type: 'invalid_request_error', message: 'output_config.effort: not supported' } }) }; return { ok: true, status: 200, json: async () => ({ type: 'message', stop_reason: 'end_turn', content: [{ type: 'text', text: '{"actions":[],"note":"n","lessons":[]}' }], usage: { input_tokens: 10, output_tokens: 50 } }) }; };
-  const t = createSocratesTrader({ dataDir: dir, seriesSource: (x) => (x === 'ABC' ? { candles: c } : null), watch: { current: () => ({ picks: [{ coin: 'ABC' }] }) }, config: { enabled: true }, env: { ANTHROPIC_API_KEY: 'k' }, log: (l) => logs.push(l), fetchImpl, clock: () => now, readTickersImpl: () => new Map([['ABC', { bid: 1, ask: 1.01, bidQty: 1e5, askQty: 1e5, ts: now }]]) });
+  const t = createSocratesTrader({ dataDir: dir, seriesSource: (x) => (x === 'ABC' ? { candles: c } : null), watch: { current: () => ({ picks: [{ coin: 'ABC' }] }) }, config: { enabled: true, ...LEGACY }, env: { ANTHROPIC_API_KEY: 'k' }, log: (l) => logs.push(l), fetchImpl, clock: () => now, readTickersImpl: () => new Map([['ABC', { bid: 1, ask: 1.01, bidQty: 1e5, askQty: 1e5, ts: now }]]) });
   try { await t.tick(); assert.equal(bodies.length, 2); assert.equal(bodies[1].output_config.effort, undefined); assert.ok(logs.some((l) => l.includes('rejected the effort setting'))); } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -289,7 +292,7 @@ test('ST-20 (v3.5). the stop floor: a stop inside the noise is refused; one at 4
   for (let i = 60; i > 0; i -= 1) c.push([Math.floor(now / 60000) * 60 - i * 60, i >= 45 ? 0.995 : 1, 1.05, 0.95, 1, 1000]); // 1h range ~10.5% -> floor ~4.2%
   const answer = (stop) => ({ type: 'message', stop_reason: 'end_turn', content: [{ type: 'text', text: JSON.stringify({ actions: [{ type: 'BUY', coin: 'ABC', usd: 100, price: null, stop, roomPct: 8, strategy: 'OTHER', why: 'x' }], note: 'n', lessons: [] }) }], usage: { input_tokens: 10, output_tokens: 50 } });
   let body; const logs = []; let nowTs = now; const fetchImpl = async () => ({ ok: true, status: 200, json: async () => body });
-  const t = createSocratesTrader({ dataDir: dir, seriesSource: (x) => (x === 'ABC' ? { candles: c } : null), watch: { current: () => ({ picks: [{ coin: 'ABC' }] }) }, config: { enabled: true }, env: { ANTHROPIC_API_KEY: 'k' }, log: (l) => logs.push(l), fetchImpl, clock: () => nowTs, readTickersImpl: () => new Map([['ABC', { bid: 1, ask: 1.01, bidQty: 1e5, askQty: 1e5, ts: nowTs }]]) });
+  const t = createSocratesTrader({ dataDir: dir, seriesSource: (x) => (x === 'ABC' ? { candles: c } : null), watch: { current: () => ({ picks: [{ coin: 'ABC' }] }) }, config: { enabled: true, ...LEGACY }, env: { ANTHROPIC_API_KEY: 'k' }, log: (l) => logs.push(l), fetchImpl, clock: () => nowTs, readTickersImpl: () => new Map([['ABC', { bid: 1, ask: 1.01, bidQty: 1e5, askQty: 1e5, ts: nowTs }]]) });
   try {
     body = answer(0.98); await t.tick(); assert.ok(!t.state().positions.ABC, 'a 2% stop on a 10% coin is refused'); assert.ok(logs.some((l) => l.includes('inside the noise')));
     nowTs += 10 * 60_000; body = answer(0.95); await t.tick(); assert.ok(t.state().positions.ABC, `a 5% stop is taken: ${logs.slice(-3).join(' // ')}`);
@@ -336,7 +339,7 @@ test('ST-23 (v3.7). fresh momentum: a buy on a coin that is down over the hour i
   const falling = rig({ answers: [ans(buy(100, 0.95))], tickerExtra: { changePct24h: 40, high24h: 1.2, low24h: 0.7 } });
   try { falling.extra.length = 0; const r0 = falling; /* make the hour red: oldest candle opens high */ } finally { falling.done(); }
   // a red hour: build candles whose oldest open is above the last close
-  const red = (() => { const dir = mkdtempSync(path.join(os.tmpdir(), 'soc-v37-')); const now = Date.UTC(2026, 8, 30, 15); const c = []; for (let i = 60; i > 0; i -= 1) c.push([Math.floor(now / 60000) * 60 - i * 60, i === 60 ? 1.05 : 1, 1.02, 0.99, 1, 1000]); const logs = []; const fetchImpl = async () => ({ ok: true, status: 200, json: async () => ({ type: 'message', stop_reason: 'end_turn', content: [{ type: 'text', text: JSON.stringify(ans(buy(100, 0.95))) }], usage: { input_tokens: 10, output_tokens: 50 } }) }); const t = createSocratesTrader({ dataDir: dir, seriesSource: (x) => (x === 'ABC' ? { candles: c } : null), watch: { current: () => ({ picks: [{ coin: 'ABC' }] }) }, config: { enabled: true }, env: { ANTHROPIC_API_KEY: 'k' }, log: (l) => logs.push(l), fetchImpl, clock: () => now, readTickersImpl: () => new Map([['ABC', { bid: 1, ask: 1.01, bidQty: 1e5, askQty: 1e5, ts: now, changePct24h: 40, high24h: 1.2, low24h: 0.7, usd24h: 1000 * 24 }]]) }); return { t, logs, done: () => rmSync(dir, { recursive: true, force: true }) }; })();
+  const red = (() => { const dir = mkdtempSync(path.join(os.tmpdir(), 'soc-v37-')); const now = Date.UTC(2026, 8, 30, 15); const c = []; for (let i = 60; i > 0; i -= 1) c.push([Math.floor(now / 60000) * 60 - i * 60, i === 60 ? 1.05 : 1, 1.02, 0.99, 1, 1000]); const logs = []; const fetchImpl = async () => ({ ok: true, status: 200, json: async () => ({ type: 'message', stop_reason: 'end_turn', content: [{ type: 'text', text: JSON.stringify(ans(buy(100, 0.95))) }], usage: { input_tokens: 10, output_tokens: 50 } }) }); const t = createSocratesTrader({ dataDir: dir, seriesSource: (x) => (x === 'ABC' ? { candles: c } : null), watch: { current: () => ({ picks: [{ coin: 'ABC' }] }) }, config: { enabled: true, ...LEGACY }, env: { ANTHROPIC_API_KEY: 'k' }, log: (l) => logs.push(l), fetchImpl, clock: () => now, readTickersImpl: () => new Map([['ABC', { bid: 1, ask: 1.01, bidQty: 1e5, askQty: 1e5, ts: now, changePct24h: 40, high24h: 1.2, low24h: 0.7, usd24h: 1000 * 24 }]]) }); return { t, logs, done: () => rmSync(dir, { recursive: true, force: true }) }; })();
   try { await red.t.tick(); assert.ok(!red.t.state().positions.ABC, 'a red hour is refused'); assert.ok(red.logs.some((l) => l.includes('NO FRESH MOMENTUM — -4.76% over the last hour')), red.logs.filter((l) => l.includes('refused')).join(' // ')); } finally { red.done(); }
   // up over the hour but stale volume: the hour's $60k vs a normal hour of $100k -> 0.6x
   const stale = rig({ answers: [ans(buy(100, 0.95))], tickerExtra: { changePct24h: 40, high24h: 1.2, low24h: 0.7, usd24h: 100_000 * 24 } });
@@ -347,12 +350,12 @@ test('ST-23 (v3.7). fresh momentum: a buy on a coin that is down over the hour i
   // no 24h volume on the ticker: volume is not judged; the hour is up, so it buys
   const unknown = rig({ answers: [ans(buy(100, 0.95))], tickerExtra: { changePct24h: 40, high24h: 1.2, low24h: 0.7 } });
   try { await unknown.t.tick(); assert.ok(unknown.t.state().positions.ABC); } finally { unknown.done(); }
-  assert.deepEqual(TRADER_DEFAULTS.freshMomentum, { minRet1hPct: 0, minVolX: 3, maxRet1hPct: 6 });
+  assert.deepEqual(TRADER_DEFAULTS.freshMomentum, { minRet1hPct: -Infinity, minVolX: 0, maxRet1hPct: 6 }); // v4.4: the hour's direction and volume are no longer gates; the +6% late-chase cap stays
 });
 
 test('ST-24 (v3.8). the late-chase cap and the stop cap: a coin already up more than 6% over the hour is refused; a stop wider than 6% under is tightened to 6%, not refused; a 5% stop is kept', async () => {
   // up ~8.7% over the hour (oldest candle opens at 0.92), fresh money 3x: refused as a LATE CHASE
-  const late = (() => { const dir = mkdtempSync(path.join(os.tmpdir(), 'soc-v38-')); const now = Date.UTC(2026, 8, 30, 15); const c = []; for (let i = 60; i > 0; i -= 1) c.push([Math.floor(now / 60000) * 60 - i * 60, i === 60 ? 0.92 : 1, 1.02, 0.99, 1, 1000]); const logs = []; const fetchImpl = async () => ({ ok: true, status: 200, json: async () => ({ type: 'message', stop_reason: 'end_turn', content: [{ type: 'text', text: JSON.stringify(ans(buy(100, 0.95))) }], usage: { input_tokens: 10, output_tokens: 50 } }) }); const t = createSocratesTrader({ dataDir: dir, seriesSource: (x) => (x === 'ABC' ? { candles: c } : null), watch: { current: () => ({ picks: [{ coin: 'ABC' }] }) }, config: { enabled: true }, env: { ANTHROPIC_API_KEY: 'k' }, log: (l) => logs.push(l), fetchImpl, clock: () => now, readTickersImpl: () => new Map([['ABC', { bid: 1, ask: 1.01, bidQty: 1e5, askQty: 1e5, ts: now, changePct24h: 40, high24h: 1.2, low24h: 0.7, usd24h: 20_000 * 24 }]]) }); return { t, logs, done: () => rmSync(dir, { recursive: true, force: true }) }; })();
+  const late = (() => { const dir = mkdtempSync(path.join(os.tmpdir(), 'soc-v38-')); const now = Date.UTC(2026, 8, 30, 15); const c = []; for (let i = 60; i > 0; i -= 1) c.push([Math.floor(now / 60000) * 60 - i * 60, i === 60 ? 0.92 : 1, 1.02, 0.99, 1, 1000]); const logs = []; const fetchImpl = async () => ({ ok: true, status: 200, json: async () => ({ type: 'message', stop_reason: 'end_turn', content: [{ type: 'text', text: JSON.stringify(ans(buy(100, 0.95))) }], usage: { input_tokens: 10, output_tokens: 50 } }) }); const t = createSocratesTrader({ dataDir: dir, seriesSource: (x) => (x === 'ABC' ? { candles: c } : null), watch: { current: () => ({ picks: [{ coin: 'ABC' }] }) }, config: { enabled: true, ...LEGACY }, env: { ANTHROPIC_API_KEY: 'k' }, log: (l) => logs.push(l), fetchImpl, clock: () => now, readTickersImpl: () => new Map([['ABC', { bid: 1, ask: 1.01, bidQty: 1e5, askQty: 1e5, ts: now, changePct24h: 40, high24h: 1.2, low24h: 0.7, usd24h: 20_000 * 24 }]]) }); return { t, logs, done: () => rmSync(dir, { recursive: true, force: true }) }; })();
   try { await late.t.tick(); assert.ok(!late.t.state().positions.ABC, 'a late chase is refused'); assert.ok(late.logs.some((l) => l.includes('LATE CHASE — already +8.7% over the last hour')), late.logs.filter((l) => l.includes('refused')).join(' // ')); } finally { late.done(); }
   // a 10% stop on a normal buy is tightened to 6% under the bid (0.94), and the buy goes through
   const wide = rig({ answers: [ans(buy(100, 0.90))], tickerExtra: { changePct24h: 40, high24h: 1.2, low24h: 0.7, usd24h: 20_000 * 24 } });
@@ -372,4 +375,73 @@ test('ST-26 (v4.0). the target: at +4% the WHOLE position is sold as a resting m
     const c = r.t.state().closed.at(-1); assert.equal(c.reason, 'TARGET'); assert.ok(Math.abs(c.exitPx - 1.01 * 1.04) < 1e-9, `exit at +4% over 1.01, got ${c.exitPx}`); assert.equal(r.t.state().trades, 1); assert.ok(c.pnlUsd > 0);
   } finally { r.done(); }
   assert.equal(TRADER_DEFAULTS.takeAllAtPct, 4);
+});
+
+test('ST-27 (v4.1). the first shake: a SELL by decision inside 10 minutes of the fill is refused (stop and target still work); after 10 minutes it is allowed; a $60 buy is under the $100 minimum; a thin ask shrinks the order instead of refusing it', async () => {
+  const sellA = { type: 'SELL', coin: 'ABC', usd: null, price: null, stop: null, roomPct: null, strategy: 'OTHER', why: 'nerves' };
+  const r = rig({ config: { noSellMinutes: 10 }, answers: [ans(buy(500, 0.95)), ans(sellA), ans(sellA)], tickerExtra: { changePct24h: 40, high24h: 1.2, low24h: 0.7, usd24h: 20_000 * 24 } });
+  try {
+    await r.t.tick(); assert.ok(r.t.state().positions.ABC);
+    r.book.bid = 0.995; r.advance(60_000); await r.t.tick(); assert.ok(r.t.state().positions.ABC, 'still held: the sell at 1 min is refused'); assert.ok(r.logs.some((l) => l.includes('THE FIRST SHAKE — held only 1 min')), r.logs.filter((l) => l.includes('refused')).join(' // '));
+    r.advance(10 * 60_000); await r.t.tick(); assert.ok(!r.t.state().positions.ABC, `sold after 11 min: ${r.logs.slice(-3).join(' // ')}`); assert.equal(r.t.state().closed.at(-1).reason, 'DECISION');
+  } finally { r.done(); }
+  // the stop still fires inside the first 10 minutes
+  const st = rig({ answers: [ans(buy(500, 0.95))], tickerExtra: { changePct24h: 40, high24h: 1.2, low24h: 0.7, usd24h: 20_000 * 24 } });
+  try { await st.t.tick(); st.book.bid = 0.94; st.advance(30_000); await st.t.tick(); assert.ok(!st.t.state().positions.ABC); assert.equal(st.t.state().closed.at(-1).reason, 'STOP'); } finally { st.done(); }
+  // $60 is under the $100 minimum
+  const small = rig({ answers: [ans(buy(60, 0.95))], tickerExtra: { changePct24h: 40, high24h: 1.2, low24h: 0.7, usd24h: 20_000 * 24 } });
+  try { await small.t.tick(); assert.ok(!small.t.state().positions.ABC); assert.ok(small.logs.some((l) => l.includes('under the $100 minimum'))); } finally { small.done(); }
+  assert.equal(TRADER_DEFAULTS.minTradeUsd, 100);
+});
+
+test('ST-28 (v4.1). a thin ask shrinks a full-size buy to the dollars offered (here $200) rather than refusing it', async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'soc-v41-')); const now = Date.UTC(2026, 8, 30, 15); const c = []; for (let i = 60; i > 0; i -= 1) c.push([Math.floor(now / 60000) * 60 - i * 60, i >= 55 ? 0.995 : 1, 1.02, 0.99, 1, 1000]);
+  const logs = []; const fetchImpl = async () => ({ ok: true, status: 200, json: async () => ({ type: 'message', stop_reason: 'end_turn', content: [{ type: 'text', text: JSON.stringify(ans(buy(500, 0.95))) }], usage: { input_tokens: 10, output_tokens: 50 } }) });
+  const t = createSocratesTrader({ dataDir: dir, seriesSource: (x) => (x === 'ABC' ? { candles: c, trades: Array(60).fill(6) } : null), watch: { current: () => ({ picks: [{ coin: 'ABC' }] }) }, config: { enabled: true, ...LEGACY }, env: { ANTHROPIC_API_KEY: 'k' }, log: (l) => logs.push(l), fetchImpl, clock: () => now, readTickersImpl: () => new Map([['ABC', { bid: 1, ask: 1.01, bidQty: 1e5, askQty: 198, ts: now, changePct24h: 40, high24h: 1.2, low24h: 0.7, usd24h: 20_000 * 24 }]]) });
+  try { await t.tick(); const p = t.state().positions.ABC; assert.ok(p, `bought: ${logs.slice(-3).join(' // ')}`); assert.ok(p.costUsd > 190 && p.costUsd < 201, `sized to the ask (~$200), got ${p.costUsd}`); } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('ST-29 (v4.2). the code owns the exits: a market BUY is refused (LIMIT only); a SELL by decision is refused even an hour after the fill; the 4 h time limit sells at the bid; the defaults say so', async () => {
+  const lb = { type: 'LIMIT_BUY', coin: 'ABC', usd: 500, price: 0.995, stop: 0.95, roomPct: 8, strategy: 'OTHER', why: 'rest it' };
+  const sellA = { type: 'SELL', coin: 'ABC', usd: null, price: null, stop: null, roomPct: null, strategy: 'OTHER', why: 'nerves' };
+  const r = rig({ config: { limitOnly: true, noSellMinutes: Infinity, maxHoldHours: 4 }, answers: [ans(buy(500, 0.95)), ans(lb), ans(sellA), ans(sellA)], tickerExtra: { changePct24h: 40, high24h: 1.2, low24h: 0.7, usd24h: 20_000 * 24 } });
+  try {
+    await r.t.tick(); assert.ok(!r.t.state().positions.ABC, 'a market BUY is refused'); assert.ok(r.logs.some((l) => l.includes('LIMIT ONLY (v4.2)')), r.logs.filter((l) => l.includes('refused')).join(' // '));
+    r.advance(4 * 60_000); await r.t.tick(); assert.ok(r.t.state().orders.ABC, `the limit rests: ${r.logs.slice(-3).join(' // ')}`);
+    r.advance(60_000); r.extra.push([Math.floor(r.now() / 60000) * 60 - 60, 0.99]); r.advance(15_000); await r.t.tick(); assert.ok(r.t.state().positions.ABC, `the limit filled: ${r.logs.slice(-3).join(' // ')}`);
+    r.advance(60 * 60_000); await r.t.tick(); assert.ok(r.t.state().positions.ABC, 'still held: SELL by decision is refused even after an hour'); assert.ok(r.logs.some((l) => l.includes('THE CODE OWNS THE EXITS (v4.2)')), r.logs.filter((l) => l.includes('refused')).join(' // '));
+    r.advance(3 * 60 * 60_000 + 60_000); await r.t.tick(); assert.ok(!r.t.state().positions.ABC, `sold at the 4 h time limit: ${r.logs.slice(-3).join(' // ')}`); assert.equal(r.t.state().closed.at(-1).reason, 'TIME');
+  } finally { r.done(); }
+  assert.equal(TRADER_DEFAULTS.limitOnly, true); assert.equal(TRADER_DEFAULTS.noSellMinutes, Infinity); assert.equal(TRADER_DEFAULTS.maxHoldHours, 4);
+});
+
+test('ST-30 (v4.3). fresh high: a coin whose 24h high is older than 4 h is refused as a DEAD CAT; one whose 24h high was made in the last 4 h buys; no 24h high on the ticker is not judged; the pocket scan ranks fresh highs first; the hunting hours are 15-18 UTC', async () => {
+  const { pocketScan } = await import('../experiment/socrates-trader.js');
+  const base = { limitOnly: false, noSellMinutes: 0, maxHoldHours: 0, dayShift: { startUtc: 13, endUtc: 21 }, freshHigh: { withinPct: 0.3 } };
+  // candles top out at 1.02 (the rig); a 24h high of 1.2 is older than 4 h -> dead cat
+  const dead = rig({ config: base, answers: [ans(buy(500, 0.95))], tickerExtra: { changePct24h: 40, high24h: 1.2, low24h: 0.7, usd24h: 20_000 * 24 } });
+  try { await dead.t.tick(); assert.ok(!dead.t.state().positions.ABC, 'dead cat refused'); assert.ok(dead.logs.some((l) => l.includes('DEAD CAT — the 24h high')), dead.logs.filter((l) => l.includes('refused')).join(' // ')); } finally { dead.done(); }
+  // a 24h high of 1.02 = the 4h high -> fresh
+  const fresh = rig({ config: base, answers: [ans(buy(500, 0.95))], tickerExtra: { changePct24h: 40, high24h: 1.02, low24h: 0.7, usd24h: 20_000 * 24 } });
+  try { await fresh.t.tick(); assert.ok(fresh.t.state().positions.ABC, `fresh high buys: ${fresh.logs.slice(-3).join(' // ')}`); } finally { fresh.done(); }
+  // no high24h: not judged (the dead-coin rule also needs it; with changePct24h positive and no range it is not dead)
+  const unknown = rig({ config: base, answers: [ans(buy(500, 0.95))], tickerExtra: { changePct24h: 40, usd24h: 20_000 * 24 } });
+  try { await unknown.t.tick(); assert.ok(unknown.t.state().positions.ABC, `unknown is not judged: ${unknown.logs.slice(-3).join(' // ')}`); } finally { unknown.done(); }
+  // pocket scan: fresh first
+  const now = Date.UTC(2026, 8, 30, 15); const mk = (hiLast) => { const c = []; for (let i = 60; i > 0; i -= 1) c.push([Math.floor(now / 60000) * 60 - i * 60, 1.05, i === 2 ? hiLast : 1.06, 0.95, i <= 3 ? 0.98 : 1.0, 2000]); return c; };
+  const series = (coin) => ({ candles: mk(coin === 'FRESH' ? 1.2 : 1.06) });
+  const tick = (coin) => ({ bid: 0.98, ask: 0.99, bidQty: 1e5, askQty: 1e5, ts: now, changePct24h: 30, high24h: 1.2, low24h: 0.8, usd24h: 100_000 });
+  const scan = pocketScan({ coins: ['CAT', 'FRESH'], seriesSource: series, ticker: tick, nowTs: now, cfg: { minUsd1h: 1000, rangeMinPct: 7, redMinutes: 15 } });
+  assert.equal(scan.length, 2); assert.equal(scan[0].coin, 'FRESH'); assert.equal(scan[0].fresh, true); assert.equal(scan[1].fresh, false);
+  assert.deepEqual(TRADER_DEFAULTS.dayShift, { startUtc: 15, endUtc: 18 }); assert.deepEqual(TRADER_DEFAULTS.freshHigh, { withinPct: 0.3 });
+});
+
+test('ST-31 (v4.4). with the defaults, a fresh-high dip that is DOWN on the hour with ordinary volume is bought (the hour\'s direction and volume are not gates); a coin up 7% on the hour is still refused as a late chase', async () => {
+  const now = Date.UTC(2026, 8, 30, 16); // 16:00 UTC: inside the 15-18 hunting hours
+  const mk = (firstOpen, hiLast) => { const c = []; for (let i = 60; i > 0; i -= 1) c.push([Math.floor(now / 60000) * 60 - i * 60, i === 60 ? firstOpen : 1, i === 5 ? hiLast : 1.01, 0.98, i <= 3 ? 0.985 : 1, 1000]); return c; };
+  const run = async (candles, lbPrice) => { const dir = mkdtempSync(path.join(os.tmpdir(), 'soc-v44-')); const logs = []; const fetchImpl = async () => ({ ok: true, status: 200, json: async () => ({ type: 'message', stop_reason: 'end_turn', content: [{ type: 'text', text: JSON.stringify(ans({ type: 'LIMIT_BUY', coin: 'ABC', usd: 500, price: lbPrice, stop: 0.95, roomPct: 8, strategy: 'OTHER', why: 'dip' })) }], usage: { input_tokens: 10, output_tokens: 50 } }) }); const t = createSocratesTrader({ dataDir: dir, seriesSource: (x) => (x === 'ABC' ? { candles, trades: Array(60).fill(6) } : null), watch: { current: () => ({ picks: [{ coin: 'ABC' }] }) }, config: { enabled: true }, env: { ANTHROPIC_API_KEY: 'k' }, log: (l) => logs.push(l), fetchImpl, clock: () => now, readTickersImpl: () => new Map([['ABC', { bid: 1, ask: 1.01, bidQty: 1e5, askQty: 1e5, ts: now, changePct24h: 20, high24h: 1.06, low24h: 0.8, usd24h: 100_000 * 24 }]]) }); try { await t.tick(); return { orders: t.t ? null : t.state().orders, logs }; } finally { rmSync(dir, { recursive: true, force: true }); } };
+  // down 6% on the hour (oldest open 1.06), 24h high 1.06 made 5 min ago (fresh), volume 0.04x normal: the limit rests
+  const dip = await run(mk(1.06, 1.06), 0.99); assert.ok(dip.orders.ABC, `the fresh-high dip rests a limit: ${dip.logs.filter((l) => /refused|LIMIT/.test(l)).join(' // ')}`);
+  // up ~9% on the hour (oldest open 0.90, last close 0.985): late chase, refused
+  const late = await run(mk(0.90, 1.06), 0.99); assert.ok(!late.orders.ABC); assert.ok(late.logs.some((l) => l.includes('LATE CHASE')), late.logs.filter((l) => l.includes('refused')).join(' // '));
 });
