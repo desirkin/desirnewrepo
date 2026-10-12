@@ -478,6 +478,15 @@
   #ledger .symstrip div { font-size: 10px; letter-spacing: .1em; padding: 4px 9px; border-radius: 12px;
                           border: 1px solid #22334c; color: var(--dim); font-variant-numeric: tabular-nums; }
   #ledger .fees { margin-top: 12px; font-size: 11px; letter-spacing: .18em; color: #c7a15a; }
+  /* SOCRATES in the ledger (owner, 2026-10-12): his own $500 account at the top of the LEDGER panel, read from /api/socrates */
+  #ledger .soc { border: 1px solid #2a4a3a; border-radius: 12px; padding: 10px 12px; margin-bottom: 14px; background: rgba(10,24,18,.55); }
+  #ledger .soc .kick { font-size: 9px; letter-spacing: .3em; color: #7fdeb0; }
+  #ledger .soc .net { margin-top: 4px; }
+  #ledger .soc .sub { font-size: 11px; color: var(--dim); margin-top: 4px; }
+  #ledger .soc .hold { margin-top: 8px; font-size: 12px; }
+  #ledger .soc .look { margin-top: 8px; font-size: 11px; color: var(--dim); border-top: 1px solid #1c2942; padding-top: 6px; }
+  #ledger .soc .look b { color: var(--ink); font-weight: 600; }
+  #ledger .soc a { color: #7fdeb0; font-size: 11px; letter-spacing: .1em; }
   #ledger .empty { margin: 18px 0 8px; text-align: center; }
   #ledger .empty .big { font-size: 14px; letter-spacing: .18em; color: var(--ink); }
   #ledger .empty .sub { margin-top: 8px; font-size: 11px; color: var(--dim); letter-spacing: .12em; }
@@ -1413,6 +1422,42 @@ function renderLedger(L) {
 function ledgerError(msg) {
   $('#ledgerBody').innerHTML = `<div class="line"><span>${msg}</span></div>`;
 }
+// SOCRATES in the ledger (owner, 2026-10-12: 'so I can see what he does without having to bother you'). Read-only: the block
+// is built from /api/socrates (his status file + the tail of his journal) and is inserted at the top of the LEDGER panel on
+// every refresh. It can show, never act.
+function socratesBlockHtml(d) {
+  const s = d && d.status; if (!s) return `<div class="soc"><div class="kick">SOCRATES · HIS OWN $500</div><div class="sub">no status file yet — he has not booted on this build</div></div>`;
+  const money = (n) => (Number.isFinite(n) ? `${n < 0 ? '-' : ''}$${Math.abs(n).toFixed(2)}` : '—');
+  const pct = (n) => (Number.isFinite(n) ? `${n > 0 ? '+' : ''}${n.toFixed(2)}%` : '—');
+  const when = (ts) => { const x = new Date(ts); return `${x.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} ${x.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}`; };
+  const c = s.cage || {}; const today = new Date().toDateString();
+  const sells = (d.sells || []).slice().reverse();
+  const row = (t) => { const why = ({ TARGET: 'hit the +4% target', STOP: 'stopped out', TIME: '4-hour limit', DECISION: 'he sold', HALF_OFF: 'half off', CAGED: 'caged', EXPERIMENT_END: 'run ended' })[t.reason] || t.reason; const tm = new Date(t.ts); const short = tm.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }).replace(' ', ''); return `<div class="trow"><span class="t">${esc(short)}</span><span class="sym">${esc(t.coin)}</span><span class="px">${esc(t.entryPx)}→${esc(t.exitPx)} · ${esc(t.heldMin)}m</span><span class="net ${t.pnlUsd > 0 ? 'pos' : t.pnlUsd < 0 ? 'neg' : ''}">${money(t.pnlUsd)} <small style="font-weight:400">${pct(t.pnlPct)}</small></span><span class="wl ${t.pnlUsd > 0 ? 'pos' : t.pnlUsd < 0 ? 'neg' : ''}">${t.pnlUsd > 0 ? 'WIN' : t.pnlUsd < 0 ? 'LOSS' : 'EVEN'}</span><div class="detail">${esc(tm.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }))} · ${esc(why)}</div></div>`; };
+  const todays = sells.filter((t) => new Date(t.ts).toDateString() === today); const earlier = sells.filter((t) => new Date(t.ts).toDateString() !== today).slice(0, 8);
+  const pos = Object.entries(s.positions || {}); const ord = Object.entries(s.orders || {});
+  const holding = pos.length ? pos.map(([coin, p]) => { const live = d.bids && d.bids[coin]; const pnl = live ? ((p.qty * live * 0.992) / (p.costUsd + p.entryFeeUsd) - 1) * 100 : null; return `<div class="hold">HOLDING <b>${esc(coin)}</b> ${money(p.costUsd)} · bought ${esc(p.entryPx)} at ${esc(when(p.entryTs))} · stop ${esc(p.stop)}${pnl == null ? '' : ` · now <span class="${pnl >= 0 ? 'pos' : 'neg'}">${pct(pnl)}</span>`}</div>`; }).join('')
+    : ord.length ? ord.map(([coin, o]) => `<div class="hold">RESTING <b>${esc(coin)}</b> ${money(o.usd)} at ${esc(o.price)} · stop ${esc(o.stop)} · expires ${esc(when(o.expiresTs))}</div>`).join('')
+    : `<div class="hold" style="color:var(--dim)">holding nothing</div>`;
+  const looks = (d.decisions || []).slice().reverse().slice(0, 3).map((x) => `<div class="look"><b>${esc(when(x.ts))}</b> · ${esc(x.note || '')}</div>`).join('');
+  return `<div class="soc">
+    <div class="kick">SOCRATES · HIS OWN $500 · ${s.ended ? `RUN ENDED (${esc(s.endReason)})` : 'LIVE'}</div>
+    <div class="net">${money(s.equityUsd)} <span class="${s.returnPct > 0 ? 'pos' : s.returnPct < 0 ? 'neg' : ''}">· ${pct(s.returnPct)}</span></div>
+    <div class="sub">${esc(s.trades ?? 0)} trades (${esc(s.wins ?? 0)} won) · windows won ${esc(c.won ?? 0)} lost ${esc(c.lost ?? 0)}${c.caged ? ' · IN THE CAGE' : ''} · spend ${money(s.spend && s.spend.todayUsd)} of ${money(s.spend && s.spend.capPerDayUsd)} · as of ${esc(when(s.asOfTs))}</div>
+    ${holding}
+    ${todays.length ? `<div class="sub" style="margin-top:8px">TODAY</div><div class="trades">${todays.map(row).join('')}</div>` : `<div class="sub" style="margin-top:8px">no trades yet today</div>`}
+    ${earlier.length ? `<div class="sub" style="margin-top:8px">EARLIER</div><div class="trades">${earlier.map(row).join('')}</div>` : ''}
+    ${looks}
+    <div style="margin-top:8px"><a href="/socrates">full page →</a></div>
+  </div>`;
+}
+async function refreshSocratesBlock() {
+  const b = $('#ledgerBody'); if (!b) return;
+  let html;
+  try { const r = await fetch('/api/socrates', { cache: 'no-store' }); if (!r.ok) throw new Error(String(r.status)); html = socratesBlockHtml(await r.json()); }
+  catch (err) { html = `<div class="soc"><div class="kick">SOCRATES · HIS OWN $500</div><div class="sub">could not read him (${esc(err && err.message)}) — the deployed build may predate /api/socrates</div></div>`; }
+  const old = b.querySelector('.soc'); if (old) old.remove();
+  b.insertAdjacentHTML('afterbegin', html);
+}
 async function refreshLedger() {
   // Distinguish the failure classes instead of swallowing them: the real
   // error goes to the console (and thus VM logs), the panel names the class.
@@ -1444,6 +1489,7 @@ async function refreshLedger() {
     ledgerError('LEDGER RENDER ERROR — see console');
   }
 }
+{ const _refreshLedger = refreshLedger; refreshLedger = async function () { try { await _refreshLedger(); } finally { await refreshSocratesBlock(); } }; } // SOCRATES rides on every ledger refresh
 $('#btnLedger').addEventListener('click', () => { showLedger(); refreshLedger(); });
 
 /* ---------- MARKET-LAB research view: read-only mirror of sealed research files ---------- */
