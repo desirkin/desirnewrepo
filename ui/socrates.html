@@ -66,7 +66,7 @@ a{color:var(--fg)}
   const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   const sameDay = (a, b) => { const x = new Date(a), y = new Date(b); return x.getFullYear() === y.getFullYear() && x.getMonth() === y.getMonth() && x.getDate() === y.getDate(); };
   function trade(t) {
-    const reason = ({ TARGET: 'hit the +4% target', STOP: 'stopped out', DECISION: 'he sold', HALF_OFF: 'half off at +4%', CAGED: 'caged', EXPERIMENT_END: 'run ended' })[t.reason] || t.reason;
+    const reason = ({ TARGET: 'hit the target', STOP: 'stopped out', TIME: '4-hour limit', DECISION: 'he sold', HALF_OFF: 'half off', CAGED: 'caged', EXPERIMENT_END: 'run ended' })[t.reason] || t.reason;
     return '<div class="trade"><div class="l1"><span>' + esc(t.coin) + ' <span class="' + cls(t.pnlUsd) + '">' + money(t.pnlUsd) + ' (' + pct(t.pnlPct) + ')</span></span><span class="' + cls(t.pnlUsd) + '">' + (t.pnlUsd > 0 ? 'WIN' : t.pnlUsd < 0 ? 'LOSS' : 'EVEN') + '</span></div>'
       + '<div class="l2">' + when(t.ts) + ' · bought ' + esc(t.entryPx) + ' → sold ' + esc(t.exitPx) + ' · ' + esc(t.heldMin) + ' min · ' + esc(reason) + (t.part === 'HALF' ? ' (half)' : '') + '</div>'
       + (t.why ? '<div class="l2">' + esc(t.why) + '</div>' : '') + '</div>';

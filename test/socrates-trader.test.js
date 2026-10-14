@@ -10,7 +10,7 @@ import { createSocratesTrader, chartText, tripwireCheck, buildAlbum, tapeFacts, 
 const H = 3600_000;
 // v4.2 made the defaults strict (LIMIT only, no SELL by decision, 4 h time limit). The mechanics tests below switch those off so
 // they can exercise market fills, decision sells and long holds; ST-29 tests the v4.2 defaults themselves.
-const LEGACY = { limitOnly: false, noSellMinutes: 0, maxHoldHours: 0, freshHigh: { withinPct: 100 }, dayShift: { startUtc: 13, endUtc: 21 }, freshMomentum: { minRet1hPct: 0, minVolX: 3, maxRet1hPct: 6 }, pocket: { rangeMinPct: 7, minUsd1h: 10_000, redMinutes: 15, minDipPct: 0 }, stopFloor: { fractionOfRange1h: 0.4, minPct: 2.5, maxPct: 6 }, deadCoin: { minChangePct24h: 0, minPos24: 0.25 }, takeAllAtPct: 4 }; // v4.6 added the 3% dip, the flat 4% stop, the +6% target and turned the dead-coin rule off; ST-33 tests those // v4.3 added the fresh-high gate and the 15-18 UTC hunting hours; ST-30 tests those
+const LEGACY = { limitOnly: false, noSellMinutes: 0, maxHoldHours: 0, freshHigh: { withinPct: 100 }, dayShift: { startUtc: 13, endUtc: 21 }, freshMomentum: { minRet1hPct: 0, minVolX: 3, maxRet1hPct: 6, failClosed: false }, pocket: { rangeMinPct: 7, minUsd1h: 10_000, redMinutes: 15, minDipPct: 0, gateBuys: false }, stopFloor: { fractionOfRange1h: 0.4, minPct: 2.5, maxPct: 6 }, deadCoin: { minChangePct24h: 0, minPos24: 0.25 }, takeAllAtPct: 4, trail: { breakEvenAtPct: 3, armAtPct: 6, pct: 5 } }; // v4.6 added the 3% dip, the flat 4% stop, the +6% target and turned the dead-coin rule off; ST-33 tests those // v4.3 added the fresh-high gate and the 15-18 UTC hunting hours; ST-30 tests those
 function rig({ answers = [], bid = 1.0, ask = 1.01, key = 'k', config = {}, tapeSnap = null, lows = null, tickerExtra = {} } = {}) {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'soc-trader-')); let now = Date.UTC(2026, 8, 30, 15, 0, 0);
   const extra = []; // candles appended after start (openSec, low) to test limit fills
@@ -352,7 +352,7 @@ test('ST-23 (v3.7). fresh momentum: a buy on a coin that is down over the hour i
   // no 24h volume on the ticker: volume is not judged; the hour is up, so it buys
   const unknown = rig({ answers: [ans(buy(100, 0.95))], tickerExtra: { changePct24h: 40, high24h: 1.2, low24h: 0.7 } });
   try { await unknown.t.tick(); assert.ok(unknown.t.state().positions.ABC); } finally { unknown.done(); }
-  assert.deepEqual(TRADER_DEFAULTS.freshMomentum, { minRet1hPct: -Infinity, minVolX: 2, maxRet1hPct: 6, crashRet1hPct: -6 }); // v4.6: 2x fresh money is back, the crash floor is -6%; // v4.5: the crash floor; v4.4: the hour's direction and volume are no longer gates; the +6% late-chase cap stays
+  assert.deepEqual(TRADER_DEFAULTS.freshMomentum, { minRet1hPct: -Infinity, minVolX: 2, maxRet1hPct: 6, crashRet1hPct: -6, failClosed: true }); // v4.6: 2x fresh money is back, the crash floor is -6%; // v4.5: the crash floor; v4.4: the hour's direction and volume are no longer gates; the +6% late-chase cap stays
 });
 
 test('ST-24 (v3.8). the late-chase cap and the stop cap: a coin already up more than 6% over the hour is refused; a stop wider than 6% under is tightened to 6%, not refused; a 5% stop is kept', async () => {
@@ -371,7 +371,7 @@ test('ST-24 (v3.8). the late-chase cap and the stop cap: a coin already up more 
 test('ST-26 (v4.0). the target: at +4% the WHOLE position is sold as a resting maker sell; one closed trade, reason TARGET; the prompt says THE TARGET', async () => {
   const r = rig({ answers: [ans(buy(500, 0.95))], tickerExtra: { changePct24h: 40, high24h: 1.2, low24h: 0.7, usd24h: 20_000 * 24 } });
   try {
-    await r.t.tick(); assert.ok(r.t.state().positions.ABC); assert.ok(r.calls[0].system[0].text.includes('THE TARGET (v4.0)'));
+    await r.t.tick(); assert.ok(r.t.state().positions.ABC); assert.ok(r.calls[0].system[0].text.includes('THE TARGET (v4.6)'));
     r.book.bid = 1.02; r.advance(15_000); await r.t.tick(); assert.ok(r.t.state().positions.ABC, 'under +4%: still held');
     r.book.bid = 1.06; r.advance(15_000); await r.t.tick(); assert.ok(!r.t.state().positions.ABC, 'sold at the target');
     const c = r.t.state().closed.at(-1); assert.equal(c.reason, 'TARGET'); assert.ok(Math.abs(c.exitPx - 1.01 * 1.04) < 1e-9, `exit at +4% over 1.01, got ${c.exitPx}`); assert.equal(r.t.state().trades, 1); assert.ok(c.pnlUsd > 0);
@@ -458,10 +458,10 @@ test('ST-32 (v4.5). a fresh-high coin DOWN more than 10% on the hour is refused 
   const crash = await run(mk(1.15, 1.15), 0.99); assert.ok(!crash.orders.ABC); assert.ok(crash.logs.some((l) => l.includes('CRASH')), crash.logs.filter((l) => l.includes('refused')).join(' // '));
 });
 
-test('ST-33 (v4.6). the winning cluster: a buy needs a REAL dip (3%+ under 15 minutes ago) and 2x fresh money; down 7% on the hour is a CRASH; the stop is forced to 4% and the target is +6%; the pocket ranks the deepest dip first', async () => {
+test('ST-33 (v4.6). the winning cluster: a buy needs a REAL dip (3%+ under 30 minutes ago, the grid reference) and 2x fresh money; down 7% on the hour is a CRASH; the stop is forced to 4% and the target is +6%; the pocket ranks the deepest dip first', async () => {
   const now = Date.UTC(2026, 8, 30, 16); // 16:00 UTC: inside the 15-18 hunting hours
   // 60 one-minute candles: the open 15 minutes ago is `ref`, the last 3 closes are `lastClose`; volume per candle sets the hour's dollars
-  const mk = ({ firstOpen = 1.02, ref = 1.02, lastClose = 0.985, hi = 1.03, vol = 1000 }) => { const c = []; for (let i = 60; i > 0; i -= 1) c.push([Math.floor(now / 60000) * 60 - i * 60, i === 60 ? firstOpen : i === 16 ? ref : 1, i === 5 ? hi : 1.01, 0.98, i <= 3 ? lastClose : 1, vol]); return c; };
+  const mk = ({ firstOpen = 1.02, ref = 1.02, lastClose = 0.985, hi = 1.03, vol = 1000 }) => { const c = []; for (let i = 60; i > 0; i -= 1) c.push([Math.floor(now / 60000) * 60 - i * 60, i === 60 ? firstOpen : i === 31 ? ref : 1, i === 5 ? hi : 1.01, 0.98, i <= 3 ? lastClose : 1, vol]); return c; };
   const run = async (candles, { stop = 0.95, usd24h = 100_000 * 24 } = {}) => { const dir = mkdtempSync(path.join(os.tmpdir(), 'soc-v46-')); const logs = []; const fetchImpl = async () => ({ ok: true, status: 200, json: async () => ({ type: 'message', stop_reason: 'end_turn', content: [{ type: 'text', text: JSON.stringify(ans({ type: 'LIMIT_BUY', coin: 'ABC', usd: 500, price: 0.99, stop, roomPct: 8, strategy: 'OTHER', why: 'dip' })) }], usage: { input_tokens: 10, output_tokens: 50 } }) }); const t = createSocratesTrader({ dataDir: dir, seriesSource: (x) => (x === 'ABC' ? { candles, trades: Array(60).fill(6) } : null), watch: { current: () => ({ picks: [{ coin: 'ABC' }] }) }, config: { enabled: true }, env: { ANTHROPIC_API_KEY: 'k' }, log: (l) => logs.push(l), fetchImpl, clock: () => now, readTickersImpl: () => new Map([['ABC', { bid: 1, ask: 1.01, bidQty: 1e5, askQty: 1e5, ts: now, changePct24h: 20, high24h: 1.03, low24h: 0.8, usd24h }]]) }); try { await t.tick(); return { orders: t.state().orders, logs, cfg: t.status?.()?.config }; } finally { rmSync(dir, { recursive: true, force: true }); } };
   // the shape: 3.4% under 15 minutes ago, hour's $60k vs a $100k normal hour -> needs usd24h small enough for 2x: use usd24h = 20k*24 -> 3x
   const good = await run(mk({}), { usd24h: 20_000 * 24 }); assert.ok(good.orders.ABC, `the real dip with fresh money rests a limit: ${good.logs.filter((l) => /refused/.test(l)).join(' // ')}`);
@@ -474,4 +474,57 @@ test('ST-33 (v4.6). the winning cluster: a buy needs a REAL dip (3%+ under 15 mi
   const crash = await run(mk({ firstOpen: 1.06, hi: 1.06 }), { usd24h: 20_000 * 24 }); assert.ok(!crash.orders.ABC); assert.ok(crash.logs.some((l) => l.includes('CRASH')), crash.logs.filter((l) => l.includes('refused')).join(' // '));
   // a stop 3% under is inside the 4% floor -> refused; the defaults carry the target
   const tight = await run(mk({}), { stop: 0.9603, usd24h: 20_000 * 24 }); assert.ok(!tight.orders.ABC, 'a 3% stop is refused under the 4% floor'); assert.equal(TRADER_DEFAULTS.takeAllAtPct, 6); assert.equal(TRADER_DEFAULTS.pocket.minDipPct, 3); assert.equal(TRADER_DEFAULTS.freshMomentum.minVolX, 2); assert.equal(TRADER_DEFAULTS.freshMomentum.crashRet1hPct, -6);
+});
+
+test('ST-34 (v4.6). the whole trade under the v4.6 defaults, through the real code: the pocket finds the shape, a LIMIT_BUY rests, fills when traded through, the stop sits 4% under, +3% does NOT move the stop (no trail), +6% sells the whole position at the target; a second trade stops out at exactly 4%; the ledger adds up', async () => {
+  // v4.6 defaults (no LEGACY): the series must carry a 3%+ dip vs 15 min ago with 5%+ hour range and 2x money
+  const now0 = Date.UTC(2026, 8, 30, 15, 0, 0); let now = now0; const extra = [];
+  const mk = () => { const c = []; for (let i = 60; i > 0; i -= 1) { const t = Math.floor(now / 1000 / 60) * 60 - i * 60; const e = extra.find((x) => x[0] === t); c.push([t, i === 31 ? 1.04 : 1, i === 5 ? 1.05 : 1.02, e ? e[1] : 0.99, i <= 3 ? 1.0 : 1.01, 2000]); } return c; };
+  const series = (coin) => (coin === 'ABC' ? { candles: mk(), trades: Array(60).fill(6) } : null); series.coins = () => ['ABC'];
+  const book = { bid: 1.0, ask: 1.01 }; const tickers = () => new Map([['ABC', { bid: book.bid, ask: book.ask, bidQty: 1e5, askQty: 1e5, ts: now, changePct24h: 20, high24h: 1.05, low24h: 0.8, usd24h: 20_000 * 24 }]]);
+  const answers = [ans(limit(500, 0.99, 0.95)), ans(limit(500, 0.99, 0.95))]; const calls = [];
+  const fetchImpl = async (url, init) => { calls.push(JSON.parse(init.body)); const a = answers.shift() ?? { actions: [], note: 'wait' }; return { ok: true, status: 200, json: async () => ({ type: 'message', content: [{ type: 'text', text: JSON.stringify(a) }], usage: { input_tokens: 10, output_tokens: 50 } }) }; };
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'soc-v46-life-')); const logs = [];
+  const t = createSocratesTrader({ dataDir: dir, seriesSource: series, watch: { current: () => ({ picks: [{ coin: 'ABC', symbol: 'ABC/USD' }] }) }, config: { enabled: true }, env: { ANTHROPIC_API_KEY: 'k' }, log: (l) => logs.push(l), fetchImpl, clock: () => now, readTickersImpl: tickers });
+  try {
+    await t.tick(); let s = t.state();
+    assert.ok(s.orders.ABC, `a limit rests: ${logs.filter((l) => /refused/.test(l)).join(' // ')}`); assert.ok(Math.abs((1 - s.orders.ABC.stop / 0.99) * 100 - 4) < 0.01, 'the stop was forced to 4% under the limit');
+    assert.ok(calls[0].system[0].text.includes('THE WINNER\'S SHAPE (v4.6') && calls[0].system[0].text.includes('THE TARGET (v4.6)') && calls[0].system[0].text.includes('15:00-18:00 UTC'), 'the prompt carries v4.6 and the right hours');
+    // the price trades through the limit: a candle low under 0.99
+    extra.push([Math.floor(now / 1000 / 60) * 60 - 60, 0.985]); book.bid = 0.985; book.ask = 0.995; now += 15_000; await t.tick(); s = t.state();
+    assert.ok(s.positions.ABC, 'filled'); const p = s.positions.ABC; assert.equal(p.entryPx, 0.99); assert.ok(Math.abs((1 - p.stop / 0.99) * 100 - 4) < 0.01);
+    const costUsd = p.costUsd; assert.ok(Math.abs(costUsd + p.entryFeeUsd + s.cashUsd - 500) < 0.01, 'cash + cost + fee = $500');
+    // +3.5%: no break-even lock, the stop stays at 4% under
+    book.bid = 0.99 * 1.035; book.ask = book.bid + 0.001; now += 15_000; await t.tick(); s = t.state(); assert.ok(s.positions.ABC, 'still held at +3.5%'); assert.ok(Math.abs((1 - s.positions.ABC.stop / 0.99) * 100 - 4) < 0.01, 'v4.6: no trail, the stop did not move'); assert.ok(!logs.some((l) => l.includes('trail ABC')), 'no trail line');
+    // +6.1%: the whole position goes at the +6% target as a maker sell
+    book.bid = 0.99 * 1.061; book.ask = book.bid + 0.001; now += 15_000; await t.tick(); s = t.state();
+    assert.ok(!s.positions.ABC, 'sold at the target'); const c1 = s.closed.at(-1); assert.equal(c1.reason, 'TARGET'); assert.equal(c1.part, 'ALL');
+    const expectGross = (costUsd / 0.99) * 0.99 * 1.06; const expectNet = expectGross * (1 - 0.004) - (costUsd + p.entryFeeUsd); assert.ok(Math.abs(c1.pnlUsd - expectNet) < 0.05, `target pnl ${c1.pnlUsd} vs ${expectNet.toFixed(2)}`); assert.ok(c1.pnlPct > 5 && c1.pnlPct < 5.3, `net about +5.2% after fees: ${c1.pnlPct}`);
+    assert.ok(Math.abs(s.cashUsd - (500 + c1.pnlUsd)) < 0.05, 'cash = $500 + the win');
+    // the second trade: a new look (30 min on), a new limit, a fill, then the price falls 4%: stopped out at the stop price
+    now = now0 + 30 * 60_000; book.bid = 1.0; book.ask = 1.01; extra.length = 0; await t.tick(); s = t.state(); assert.ok(s.orders.ABC, `second limit rests: ${logs.slice(-6).join(' // ')}`);
+    extra.push([Math.floor(now / 1000 / 60) * 60 - 60, 0.985]); book.bid = 0.985; book.ask = 0.995; now += 15_000; await t.tick(); s = t.state(); assert.ok(s.positions.ABC, 'second fill'); const p2 = s.positions.ABC;
+    book.bid = p2.stop - 0.0001; book.ask = book.bid + 0.001; now += 15_000; await t.tick(); s = t.state(); assert.ok(!s.positions.ABC, 'stopped'); const c2 = s.closed.at(-1); assert.equal(c2.reason, 'STOP'); assert.ok(c2.pnlPct < -4.5 && c2.pnlPct > -5.5, `a 4% stop plus fees nets about -5%: ${c2.pnlPct}`);
+    assert.equal(s.closed.length, 2); assert.ok(Math.abs(s.cashUsd - (500 + c1.pnlUsd + c2.pnlUsd)) < 0.05, 'the ledger adds up over both trades');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('ST-35 (v4.6). the PRODUCTION config file (config/socrates-trader.json) merged over the defaults is the tested rule — nothing in the file quietly turns the trail, the half-off, the tripwire, fast looks or the old exits back on', async () => {
+  const { readTraderConfig } = await import('../experiment/socrates-trader.js');
+  const file = readTraderConfig(path.join(process.cwd(), 'config', 'socrates-trader.json')); assert.ok(file && file.enabled === true, 'the config file is present and enabled');
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'soc-cfg-')); const now = Date.UTC(2026, 8, 30, 16);
+  const series = () => null; series.coins = () => [];
+  const t = createSocratesTrader({ dataDir: dir, seriesSource: series, watch: { current: () => ({ picks: [] }) }, config: file, env: { ANTHROPIC_API_KEY: 'k' }, log: () => {}, fetchImpl: async () => { throw new Error('no call expected'); }, clock: () => now, readTickersImpl: () => new Map() });
+  try {
+    const c = t.config;
+    assert.equal(c.takeAllAtPct, 6); assert.equal(c.maxHoldHours, 4); assert.equal(c.limitOnly, true); assert.equal(c.noSellMinutes, Infinity);
+    assert.deepEqual(c.stopFloor, { fractionOfRange1h: 0.4, minPct: 4, maxPct: 4 });
+    assert.equal(c.trail.breakEvenAtPct, Infinity); assert.equal(c.trail.armAtPct, Infinity);
+    assert.deepEqual(c.pocket, { rangeMinPct: 5, minUsd1h: 10_000, redMinutes: 30, minDipPct: 3, gateBuys: true });
+    assert.deepEqual(c.freshMomentum, { minRet1hPct: -Infinity, minVolX: 2, maxRet1hPct: 6, crashRet1hPct: -6, failClosed: true });
+    assert.deepEqual(c.deadCoin, { minChangePct24h: -Infinity, minPos24: -Infinity }); assert.deepEqual(c.freshHigh, { withinPct: 0.3 }); assert.deepEqual(c.dayShift, { startUtc: 15, endUtc: 18 });
+    assert.equal(c.maxPositions, 1); assert.equal(c.maxTradeFractionOfEquity, 1);
+    assert.ok(c.lookLadderMs.every((ms) => ms === 1_800_000), 'looks every 30 minutes, the tested cadence'); assert.ok(c.tripwire.jumpPct >= 100, 'the tripwire is off');
+    assert.ok(c.durationHours >= 72 && c.maxLostInARow >= 10, 'the run outlives the 3-day test and does not end itself on two losses');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
