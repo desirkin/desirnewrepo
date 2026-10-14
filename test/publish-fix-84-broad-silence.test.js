@@ -57,13 +57,13 @@ const catalog = (rows) => { const c = { venue: 'kraken', quote: 'USD', policyVer
 const ack = (socket, request, symbol = null) => socket.emit({ method: 'subscribe', req_id: request.req_id, success: true, result: { channel: request.params.channel, ...(symbol ? { symbol } : {}) } });
 const ticker = (symbol) => ({ symbol, ask: 101, ask_qty: null, bid: 99, bid_qty: 2, change: 1, change_pct: 1, high: 105, last: 100, low: 90, volume: 123.5, vwap: 98.2, timestamp: new Date(T).toISOString() });
 
-test('FIX84-BS2. the broad collector reconnects when its DATA goes silent while the socket reads OPEN (heartbeats keep flowing); it never fires with nothing subscribed, and not again inside the silence window', async () => {
+test('FIX84-BS2. the broad collector reconnects when its DATA goes silent while the socket reads OPEN (heartbeats keep flowing); a fresh socket gets its grace, and it does not fire again inside the silence window', async () => {
   FakeSocket.instances.length = 0; const dir = mkdtempSync(path.join(tmpdir(), 'cobra-broad-silence-')); let now = T; const logs = [];
   const c = catalog([market('AAA'), market('BBB')]);
   const handle = startBroadKraken({ catalogSource: { snapshot: () => ({ catalog: c, fresh: true }) }, dataDir: dir, WebSocketImpl: FakeSocket, clock: () => now, log: (l) => logs.push(String(l)), limits: { subscribeChunkSize: 2, subscribePaceMs: 1, latestSnapshotMs: 1, catalogPollMs: 60_000, dataSilenceMs: 180_000 } });
   try {
     const socket = FakeSocket.instances[0]; assert.ok(socket); socket.open();
-    now += 400_000; assert.equal(handle._dataSilenceLaw(now), false, 'nothing subscribed yet: not silence');
+    now += 20_000; assert.equal(handle._dataSilenceLaw(now), false, 'twenty seconds after open, nothing subscribed yet: the grace period');
     const instrumentRequest = socket.sent.find((r) => r.params.channel === 'instrument'); ack(socket, instrumentRequest);
     socket.emit({ channel: 'instrument', type: 'snapshot', data: { assets: [], pairs: [{ symbol: 'AAA/USD', base: 'AAA', quote: 'USD', status: 'online' }, { symbol: 'BBB/USD', base: 'BBB', quote: 'USD', status: 'online' }] } });
     await sleep(20);

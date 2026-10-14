@@ -434,13 +434,21 @@ export function startBroadKraken({
   // ticker or candle message for dataSilenceMs (3 minutes across 600+ pairs is silence, not a quiet market), the socket is torn
   // down and rebuilt through the client's detached drop (subscriptions re-queue on the new epoch as they always did after a close).
   let lastDataTs = null; let dataSilentReconnects = 0; let lastDataSilenceCheckTs = 0;
+  // PUBLISH-FIX-126 (the blind eye — Oct 12 05:43 and Oct 13 10:31 ET): twice the venue dropped the socket, the client reconnected, and
+  // the markets never came back (the instrument snapshot or the subscribe acks were lost on the new socket). With NOTHING subscribed
+  // the law above stood down ("not silence, nothing is subscribed yet") and the broad eye stayed blind — 0 on the watch — through a
+  // whole day shift, with no log line. Now: no ticker or candle for dataSilenceMs after the socket opened is silence whatever the
+  // subscription count (a healthy boot has its first ticker snapshot within seconds of the first ack, 600 markets subscribe in ~12 s),
+  // the line says which case it was, and the drop repeats every dataSilenceMs until data flows again.
   function dataSilenceLaw(now) {
     if (stopping || !ws || ws.status?.().state !== 'OPEN' || typeof ws.reconnect !== 'function') return false;
-    const subscribed = [...markets.values()].filter((m) => m.channels.ticker === 'SUBSCRIBED' || m.channels.ohlc === 'SUBSCRIBED').length; if (!subscribed) return false;
-    const since = lastDataTs ?? ws.status().openedTs ?? now; if (now - since < cfg.dataSilenceMs) return false;
+    const subscribed = [...markets.values()].filter((m) => m.channels.ticker === 'SUBSCRIBED' || m.channels.ohlc === 'SUBSCRIBED').length;
+    const openedTs = ws.status().openedTs ?? now;
+    const since = Math.max(lastDataTs ?? 0, openedTs); if (now - since < cfg.dataSilenceMs) return false;
     if (now - lastDataSilenceCheckTs < cfg.dataSilenceMs) return false; lastDataSilenceCheckTs = now;
     dataSilentReconnects += 1; counters.dataSilentReconnects = dataSilentReconnects;
-    log(`BROAD KRAKEN: DATA SILENCE — ${subscribed} market(s) subscribed, no ticker or candle for ${Math.round((now - since) / 1000)} s while the socket reads OPEN; reconnecting (${dataSilentReconnects} so far)`);
+    const why = subscribed ? `${subscribed} market(s) subscribed` : `NOTHING subscribed since the socket opened (instrument ${instrumentState}, ${markets.size} markets, ${subscriptionQueue.length} queued)`;
+    log(`BROAD KRAKEN: DATA SILENCE — ${why}, no ticker or candle for ${Math.round((now - since) / 1000)} s while the socket reads OPEN; reconnecting (${dataSilentReconnects} so far)`);
     return ws.reconnect('DATA_SILENT');
   }
   let acceptedCatalog = null; let lastInstrumentTs = null; let instrumentState = 'AWAITING'; let instrumentError = null;

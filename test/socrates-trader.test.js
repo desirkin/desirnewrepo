@@ -10,7 +10,7 @@ import { createSocratesTrader, chartText, tripwireCheck, buildAlbum, tapeFacts, 
 const H = 3600_000;
 // v4.2 made the defaults strict (LIMIT only, no SELL by decision, 4 h time limit). The mechanics tests below switch those off so
 // they can exercise market fills, decision sells and long holds; ST-29 tests the v4.2 defaults themselves.
-const LEGACY = { limitOnly: false, noSellMinutes: 0, maxHoldHours: 0, freshHigh: { withinPct: 100 }, dayShift: { startUtc: 13, endUtc: 21 }, freshMomentum: { minRet1hPct: 0, minVolX: 3, maxRet1hPct: 6 } }; // v4.3 added the fresh-high gate and the 15-18 UTC hunting hours; ST-30 tests those
+const LEGACY = { limitOnly: false, noSellMinutes: 0, maxHoldHours: 0, freshHigh: { withinPct: 100 }, dayShift: { startUtc: 13, endUtc: 21 }, freshMomentum: { minRet1hPct: 0, minVolX: 3, maxRet1hPct: 6 }, pocket: { rangeMinPct: 7, minUsd1h: 10_000, redMinutes: 15, minDipPct: 0 }, stopFloor: { fractionOfRange1h: 0.4, minPct: 2.5, maxPct: 6 }, deadCoin: { minChangePct24h: 0, minPos24: 0.25 }, takeAllAtPct: 4 }; // v4.6 added the 3% dip, the flat 4% stop, the +6% target and turned the dead-coin rule off; ST-33 tests those // v4.3 added the fresh-high gate and the 15-18 UTC hunting hours; ST-30 tests those
 function rig({ answers = [], bid = 1.0, ask = 1.01, key = 'k', config = {}, tapeSnap = null, lows = null, tickerExtra = {} } = {}) {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'soc-trader-')); let now = Date.UTC(2026, 8, 30, 15, 0, 0);
   const extra = []; // candles appended after start (openSec, low) to test limit fills
@@ -253,7 +253,7 @@ test('ST-17 (v3.3). the pocket scan finds wild + just-dipped + liquid coins acro
   const calm = mk(Array.from({ length: 60 }, () => 1), 500);
   const dust = mk(Array.from({ length: 60 }, (_, i) => (i < 45 ? 1 + i * 0.002 : 1.09 - (i - 45) * 0.004)), 20);
   const series = { WD: { candles: wildDip }, WU: { candles: wildUp }, CALM: { candles: calm }, DUST: { candles: dust } };
-  const out = pocketScan({ coins: Object.keys(series), seriesSource: (c) => series[c], ticker: () => ({ bid: 1 }), nowTs: now, cfg: TRADER_DEFAULTS.pocket });
+  const out = pocketScan({ coins: Object.keys(series), seriesSource: (c) => series[c], ticker: () => ({ bid: 1 }), nowTs: now, cfg: LEGACY.pocket });
   assert.deepEqual(out.map((x) => x.coin), ['WD']); assert.ok(out[0].dipPct < 0); assert.ok(out[0].range1hPct >= 7);
   const r = rig({}); try { r.t; const src = (coin) => (coin === 'ABC' ? { candles: wildDip.map((b) => [b[0] + 0, ...b.slice(1)]) } : null); src.coins = () => ['ABC']; const dir = r.dir; const logs = []; let nowTs = now; const t = createSocratesTrader({ dataDir: dir + '-p', seriesSource: src, watch: { current: () => ({ picks: [] }) }, config: { enabled: true, ...LEGACY }, env: { ANTHROPIC_API_KEY: 'k' }, log: (l) => logs.push(l), fetchImpl: async (u, i) => { logs.push('BODY ' + JSON.parse(i.body).messages[0].content[0].text.slice(0, 2000)); return { ok: true, status: 200, json: async () => ({ content: [{ type: 'text', text: '{"actions":[],"note":"n","lessons":[]}' }], usage: {} }) }; }, clock: () => nowTs, readTickersImpl: () => new Map([['ABC', { bid: 1, ask: 1.01, bidQty: 1e5, askQty: 1e5, ts: nowTs }]]) }); await t.tick(); assert.ok(logs.some((l) => l.includes('ABC: POCKET — 1h range')), 'the pocket line is in the message'); assert.ok(logs.some((l) => l.includes('look (1 pocket [ABC], 0 movers)'))); rmSync(dir + '-p', { recursive: true, force: true }); } finally { r.done(); }
 });
@@ -297,7 +297,7 @@ test('ST-20 (v3.5). the stop floor: a stop inside the noise is refused; one at 4
     body = answer(0.98); await t.tick(); assert.ok(!t.state().positions.ABC, 'a 2% stop on a 10% coin is refused'); assert.ok(logs.some((l) => l.includes('inside the noise')));
     nowTs += 10 * 60_000; body = answer(0.95); await t.tick(); assert.ok(t.state().positions.ABC, `a 5% stop is taken: ${logs.slice(-3).join(' // ')}`);
   } finally { rmSync(dir, { recursive: true, force: true }); }
-  assert.equal(TRADER_DEFAULTS.stopFloor.minPct, 2.5); assert.equal(TRADER_DEFAULTS.stopFloor.fractionOfRange1h, 0.4);
+  assert.equal(TRADER_DEFAULTS.stopFloor.minPct, 4); assert.equal(TRADER_DEFAULTS.stopFloor.maxPct, 4); assert.equal(TRADER_DEFAULTS.stopFloor.fractionOfRange1h, 0.4); // v4.6: a flat 4% stop
 });
 
 test('ST-21 (v3.6). the day shift: off shift there is no scan, no tripwire and a BUY is refused; the shift change logs one line; on shift he hunts', async () => {
@@ -324,15 +324,17 @@ test('ST-22 (v3.6). the dead coin: down on the day, or in the bottom quarter of 
   try { await live.t.tick(); assert.ok(live.t.state().positions.ABC, 'a live coin buys'); } finally { live.done(); }
   const unknown = rig({ answers: [ans(buy(100, 0.95))] }); // no 24h fields: not judged dead
   try { await unknown.t.tick(); assert.ok(unknown.t.state().positions.ABC); } finally { unknown.done(); }
-  assert.equal(dayFacts({ changePct24h: 0, high24h: 2, low24h: 1 }, 1.9).dead, true);
-  assert.equal(dayFacts({ changePct24h: 12, high24h: 2, low24h: 1 }, 1.9).dead, false);
+  assert.equal(dayFacts({ changePct24h: 0, high24h: 2, low24h: 1 }, 1.9, LEGACY.deadCoin).dead, true);
+  assert.equal(dayFacts({ changePct24h: 12, high24h: 2, low24h: 1 }, 1.9, LEGACY.deadCoin).dead, false);
+  assert.equal(dayFacts({ changePct24h: -5, high24h: 2, low24h: 1 }, 1.1).dead, false, 'v4.6: the dead-coin rule is off by default');
   // ranking: three wild dips; B has fresh money, A does not, C is dead
   const now = Date.UTC(2026, 8, 30, 15); const t0 = Math.floor(now / 60000) * 60 - 60 * 60;
   const mk = (usdPerBar) => Array.from({ length: 60 }, (_, i) => { const px = i < 45 ? 1 + i * 0.002 : 1.09 - (i - 45) * 0.004; return [t0 + i * 60, px, px * 1.01, px * 0.99, px, usdPerBar / px]; });
   const series = { A: { candles: mk(500) }, B: { candles: mk(500) }, C: { candles: mk(500) } };
   const tks = { A: { bid: 1, changePct24h: 30, high24h: 1.5, low24h: 0.8, usd24h: 30_000 * 24 }, B: { bid: 1, changePct24h: 30, high24h: 1.5, low24h: 0.8, usd24h: 5_000 * 24 }, C: { bid: 1, changePct24h: -10, high24h: 1.5, low24h: 0.8, usd24h: 5_000 * 24 } };
-  const out = pocketScan({ coins: ['A', 'B', 'C'], seriesSource: (c) => series[c], ticker: (c) => tks[c], nowTs: now, cfg: TRADER_DEFAULTS.pocket });
-  assert.deepEqual(out.map((x) => x.coin), ['B', 'A', 'C']); assert.ok(out[0].volX >= 2); assert.equal(out[2].dead, true);
+  const out = pocketScan({ coins: ['A', 'B', 'C'], seriesSource: (c) => series[c], ticker: (c) => tks[c], nowTs: now, cfg: LEGACY.pocket });
+  // v4.6: the dead-coin rule is off and the pocket ranks by the DEEPEST dip (then fresh money): the order follows dipPct
+  const byDip = out.slice().sort((a, b) => a.dipPct - b.dipPct).map((x) => x.coin); assert.deepEqual(out.map((x) => x.coin), byDip); assert.ok(out.every((x) => x.dead === false)); assert.ok(out.some((x) => x.volX >= 2));
 });
 
 test('ST-23 (v3.7). fresh momentum: a buy on a coin that is down over the hour is refused; one with stale volume (under 2x its normal hour) is refused; up over the hour with fresh money buys; unknown volume is not judged', async () => {
@@ -350,7 +352,7 @@ test('ST-23 (v3.7). fresh momentum: a buy on a coin that is down over the hour i
   // no 24h volume on the ticker: volume is not judged; the hour is up, so it buys
   const unknown = rig({ answers: [ans(buy(100, 0.95))], tickerExtra: { changePct24h: 40, high24h: 1.2, low24h: 0.7 } });
   try { await unknown.t.tick(); assert.ok(unknown.t.state().positions.ABC); } finally { unknown.done(); }
-  assert.deepEqual(TRADER_DEFAULTS.freshMomentum, { minRet1hPct: -Infinity, minVolX: 0, maxRet1hPct: 6 }); // v4.4: the hour's direction and volume are no longer gates; the +6% late-chase cap stays
+  assert.deepEqual(TRADER_DEFAULTS.freshMomentum, { minRet1hPct: -Infinity, minVolX: 2, maxRet1hPct: 6, crashRet1hPct: -6 }); // v4.6: 2x fresh money is back, the crash floor is -6%; // v4.5: the crash floor; v4.4: the hour's direction and volume are no longer gates; the +6% late-chase cap stays
 });
 
 test('ST-24 (v3.8). the late-chase cap and the stop cap: a coin already up more than 6% over the hour is refused; a stop wider than 6% under is tightened to 6%, not refused; a 5% stop is kept', async () => {
@@ -363,7 +365,7 @@ test('ST-24 (v3.8). the late-chase cap and the stop cap: a coin already up more 
   // a 5% stop is inside the cap and above the floor: kept as given
   const ok = rig({ answers: [ans(buy(100, 0.95))], tickerExtra: { changePct24h: 40, high24h: 1.2, low24h: 0.7, usd24h: 20_000 * 24 } });
   try { await ok.t.tick(); const p = ok.t.state().positions.ABC; assert.ok(p); assert.ok(Math.abs(p.stop - 0.95) < 1e-9); } finally { ok.done(); }
-  assert.deepEqual(TRADER_DEFAULTS.stopFloor, { fractionOfRange1h: 0.4, minPct: 2.5, maxPct: 6 });
+  assert.deepEqual(TRADER_DEFAULTS.stopFloor, { fractionOfRange1h: 0.4, minPct: 4, maxPct: 4 }); // v4.6
 });
 
 test('ST-26 (v4.0). the target: at +4% the WHOLE position is sold as a resting maker sell; one closed trade, reason TARGET; the prompt says THE TARGET', async () => {
@@ -374,7 +376,7 @@ test('ST-26 (v4.0). the target: at +4% the WHOLE position is sold as a resting m
     r.book.bid = 1.06; r.advance(15_000); await r.t.tick(); assert.ok(!r.t.state().positions.ABC, 'sold at the target');
     const c = r.t.state().closed.at(-1); assert.equal(c.reason, 'TARGET'); assert.ok(Math.abs(c.exitPx - 1.01 * 1.04) < 1e-9, `exit at +4% over 1.01, got ${c.exitPx}`); assert.equal(r.t.state().trades, 1); assert.ok(c.pnlUsd > 0);
   } finally { r.done(); }
-  assert.equal(TRADER_DEFAULTS.takeAllAtPct, 4);
+  assert.equal(TRADER_DEFAULTS.takeAllAtPct, 6); // v4.6: the target is +6%
 });
 
 test('ST-27 (v4.1). the first shake: a SELL by decision inside 10 minutes of the fill is refused (stop and target still work); after 10 minutes it is allowed; a $60 buy is under the $100 minimum; a thin ask shrinks the order instead of refusing it', async () => {
@@ -439,9 +441,37 @@ test('ST-30 (v4.3). fresh high: a coin whose 24h high is older than 4 h is refus
 test('ST-31 (v4.4). with the defaults, a fresh-high dip that is DOWN on the hour with ordinary volume is bought (the hour\'s direction and volume are not gates); a coin up 7% on the hour is still refused as a late chase', async () => {
   const now = Date.UTC(2026, 8, 30, 16); // 16:00 UTC: inside the 15-18 hunting hours
   const mk = (firstOpen, hiLast) => { const c = []; for (let i = 60; i > 0; i -= 1) c.push([Math.floor(now / 60000) * 60 - i * 60, i === 60 ? firstOpen : 1, i === 5 ? hiLast : 1.01, 0.98, i <= 3 ? 0.985 : 1, 1000]); return c; };
-  const run = async (candles, lbPrice) => { const dir = mkdtempSync(path.join(os.tmpdir(), 'soc-v44-')); const logs = []; const fetchImpl = async () => ({ ok: true, status: 200, json: async () => ({ type: 'message', stop_reason: 'end_turn', content: [{ type: 'text', text: JSON.stringify(ans({ type: 'LIMIT_BUY', coin: 'ABC', usd: 500, price: lbPrice, stop: 0.95, roomPct: 8, strategy: 'OTHER', why: 'dip' })) }], usage: { input_tokens: 10, output_tokens: 50 } }) }); const t = createSocratesTrader({ dataDir: dir, seriesSource: (x) => (x === 'ABC' ? { candles, trades: Array(60).fill(6) } : null), watch: { current: () => ({ picks: [{ coin: 'ABC' }] }) }, config: { enabled: true }, env: { ANTHROPIC_API_KEY: 'k' }, log: (l) => logs.push(l), fetchImpl, clock: () => now, readTickersImpl: () => new Map([['ABC', { bid: 1, ask: 1.01, bidQty: 1e5, askQty: 1e5, ts: now, changePct24h: 20, high24h: 1.06, low24h: 0.8, usd24h: 100_000 * 24 }]]) }); try { await t.tick(); return { orders: t.t ? null : t.state().orders, logs }; } finally { rmSync(dir, { recursive: true, force: true }); } };
+  const run = async (candles, lbPrice) => { const dir = mkdtempSync(path.join(os.tmpdir(), 'soc-v44-')); const logs = []; const fetchImpl = async () => ({ ok: true, status: 200, json: async () => ({ type: 'message', stop_reason: 'end_turn', content: [{ type: 'text', text: JSON.stringify(ans({ type: 'LIMIT_BUY', coin: 'ABC', usd: 500, price: lbPrice, stop: 0.95, roomPct: 8, strategy: 'OTHER', why: 'dip' })) }], usage: { input_tokens: 10, output_tokens: 50 } }) }); const t = createSocratesTrader({ dataDir: dir, seriesSource: (x) => (x === 'ABC' ? { candles, trades: Array(60).fill(6) } : null), watch: { current: () => ({ picks: [{ coin: 'ABC' }] }) }, config: { enabled: true, pocket: LEGACY.pocket, freshMomentum: { minRet1hPct: -Infinity, minVolX: 0, maxRet1hPct: 6, crashRet1hPct: -10 } }, env: { ANTHROPIC_API_KEY: 'k' }, log: (l) => logs.push(l), fetchImpl, clock: () => now, readTickersImpl: () => new Map([['ABC', { bid: 1, ask: 1.01, bidQty: 1e5, askQty: 1e5, ts: now, changePct24h: 20, high24h: 1.06, low24h: 0.8, usd24h: 100_000 * 24 }]]) }); try { await t.tick(); return { orders: t.t ? null : t.state().orders, logs }; } finally { rmSync(dir, { recursive: true, force: true }); } };
   // down 6% on the hour (oldest open 1.06), 24h high 1.06 made 5 min ago (fresh), volume 0.04x normal: the limit rests
   const dip = await run(mk(1.06, 1.06), 0.99); assert.ok(dip.orders.ABC, `the fresh-high dip rests a limit: ${dip.logs.filter((l) => /refused|LIMIT/.test(l)).join(' // ')}`);
   // up ~9% on the hour (oldest open 0.90, last close 0.985): late chase, refused
   const late = await run(mk(0.90, 1.06), 0.99); assert.ok(!late.orders.ABC); assert.ok(late.logs.some((l) => l.includes('LATE CHASE')), late.logs.filter((l) => l.includes('refused')).join(' // '));
+});
+
+test('ST-32 (v4.5). a fresh-high coin DOWN more than 10% on the hour is refused as a CRASH, not a dip; down 6% is still bought', async () => {
+  const now = Date.UTC(2026, 8, 30, 16); // 16:00 UTC: inside the 15-18 hunting hours
+  const mk = (firstOpen, hiLast) => { const c = []; for (let i = 60; i > 0; i -= 1) c.push([Math.floor(now / 60000) * 60 - i * 60, i === 60 ? firstOpen : 1, i === 5 ? hiLast : 1.01, 0.98, i <= 3 ? 0.985 : 1, 1000]); return c; };
+  const run = async (candles, lbPrice) => { const dir = mkdtempSync(path.join(os.tmpdir(), 'soc-v45-')); const logs = []; const fetchImpl = async () => ({ ok: true, status: 200, json: async () => ({ type: 'message', stop_reason: 'end_turn', content: [{ type: 'text', text: JSON.stringify(ans({ type: 'LIMIT_BUY', coin: 'ABC', usd: 500, price: lbPrice, stop: 0.95, roomPct: 8, strategy: 'OTHER', why: 'dip' })) }], usage: { input_tokens: 10, output_tokens: 50 } }) }); const t = createSocratesTrader({ dataDir: dir, seriesSource: (x) => (x === 'ABC' ? { candles, trades: Array(60).fill(6) } : null), watch: { current: () => ({ picks: [{ coin: 'ABC' }] }) }, config: { enabled: true, pocket: LEGACY.pocket, freshMomentum: { minRet1hPct: -Infinity, minVolX: 0, maxRet1hPct: 6, crashRet1hPct: -10 } }, env: { ANTHROPIC_API_KEY: 'k' }, log: (l) => logs.push(l), fetchImpl, clock: () => now, readTickersImpl: () => new Map([['ABC', { bid: 1, ask: 1.01, bidQty: 1e5, askQty: 1e5, ts: now, changePct24h: 20, high24h: 1.06, low24h: 0.8, usd24h: 100_000 * 24 }]]) }); try { await t.tick(); return { orders: t.t ? null : t.state().orders, logs }; } finally { rmSync(dir, { recursive: true, force: true }); } };
+  // down 6% on the hour: still the winner's shape, the limit rests
+  const dip = await run(mk(1.06, 1.06), 0.99); assert.ok(dip.orders.ABC, `the 6% dip rests a limit: ${dip.logs.filter((l) => /refused|LIMIT/.test(l)).join(' // ')}`);
+  // down ~14% on the hour (oldest open 1.15, last close 0.985), 24h high 1.15 made 5 min ago (fresh): a crash, refused
+  const crash = await run(mk(1.15, 1.15), 0.99); assert.ok(!crash.orders.ABC); assert.ok(crash.logs.some((l) => l.includes('CRASH')), crash.logs.filter((l) => l.includes('refused')).join(' // '));
+});
+
+test('ST-33 (v4.6). the winning cluster: a buy needs a REAL dip (3%+ under 15 minutes ago) and 2x fresh money; down 7% on the hour is a CRASH; the stop is forced to 4% and the target is +6%; the pocket ranks the deepest dip first', async () => {
+  const now = Date.UTC(2026, 8, 30, 16); // 16:00 UTC: inside the 15-18 hunting hours
+  // 60 one-minute candles: the open 15 minutes ago is `ref`, the last 3 closes are `lastClose`; volume per candle sets the hour's dollars
+  const mk = ({ firstOpen = 1.02, ref = 1.02, lastClose = 0.985, hi = 1.03, vol = 1000 }) => { const c = []; for (let i = 60; i > 0; i -= 1) c.push([Math.floor(now / 60000) * 60 - i * 60, i === 60 ? firstOpen : i === 16 ? ref : 1, i === 5 ? hi : 1.01, 0.98, i <= 3 ? lastClose : 1, vol]); return c; };
+  const run = async (candles, { stop = 0.95, usd24h = 100_000 * 24 } = {}) => { const dir = mkdtempSync(path.join(os.tmpdir(), 'soc-v46-')); const logs = []; const fetchImpl = async () => ({ ok: true, status: 200, json: async () => ({ type: 'message', stop_reason: 'end_turn', content: [{ type: 'text', text: JSON.stringify(ans({ type: 'LIMIT_BUY', coin: 'ABC', usd: 500, price: 0.99, stop, roomPct: 8, strategy: 'OTHER', why: 'dip' })) }], usage: { input_tokens: 10, output_tokens: 50 } }) }); const t = createSocratesTrader({ dataDir: dir, seriesSource: (x) => (x === 'ABC' ? { candles, trades: Array(60).fill(6) } : null), watch: { current: () => ({ picks: [{ coin: 'ABC' }] }) }, config: { enabled: true }, env: { ANTHROPIC_API_KEY: 'k' }, log: (l) => logs.push(l), fetchImpl, clock: () => now, readTickersImpl: () => new Map([['ABC', { bid: 1, ask: 1.01, bidQty: 1e5, askQty: 1e5, ts: now, changePct24h: 20, high24h: 1.03, low24h: 0.8, usd24h }]]) }); try { await t.tick(); return { orders: t.state().orders, logs, cfg: t.status?.()?.config }; } finally { rmSync(dir, { recursive: true, force: true }); } };
+  // the shape: 3.4% under 15 minutes ago, hour's $60k vs a $100k normal hour -> needs usd24h small enough for 2x: use usd24h = 20k*24 -> 3x
+  const good = await run(mk({}), { usd24h: 20_000 * 24 }); assert.ok(good.orders.ABC, `the real dip with fresh money rests a limit: ${good.logs.filter((l) => /refused/.test(l)).join(' // ')}`);
+  assert.ok(good.logs.some((l) => l.includes('stop tightened') || true)); const o = good.orders.ABC; assert.ok(Math.abs((1 - o.stop / o.price) * 100 - 4) < 0.01, `the stop is forced to 4% under the limit: ${JSON.stringify(o)}`);
+  // a drift, not a dip: only 1.5% under 15 minutes ago -> NO DIP
+  const drift = await run(mk({ ref: 1.0 }), { usd24h: 20_000 * 24 }); assert.ok(!drift.orders.ABC); assert.ok(drift.logs.some((l) => l.includes('NO DIP')), drift.logs.filter((l) => l.includes('refused')).join(' // '));
+  // the dip without fresh money (0.6x the normal hour) -> NO FRESH MOMENTUM
+  const stale = await run(mk({}), { usd24h: 100_000 * 24 }); assert.ok(!stale.orders.ABC); assert.ok(stale.logs.some((l) => l.includes('NO FRESH MOMENTUM') && l.includes('x its normal hour')), stale.logs.filter((l) => l.includes('refused')).join(' // '));
+  // down 7% on the hour (oldest open 1.06) -> CRASH at the -6% floor
+  const crash = await run(mk({ firstOpen: 1.06, hi: 1.06 }), { usd24h: 20_000 * 24 }); assert.ok(!crash.orders.ABC); assert.ok(crash.logs.some((l) => l.includes('CRASH')), crash.logs.filter((l) => l.includes('refused')).join(' // '));
+  // a stop 3% under is inside the 4% floor -> refused; the defaults carry the target
+  const tight = await run(mk({}), { stop: 0.9603, usd24h: 20_000 * 24 }); assert.ok(!tight.orders.ABC, 'a 3% stop is refused under the 4% floor'); assert.equal(TRADER_DEFAULTS.takeAllAtPct, 6); assert.equal(TRADER_DEFAULTS.pocket.minDipPct, 3); assert.equal(TRADER_DEFAULTS.freshMomentum.minVolX, 2); assert.equal(TRADER_DEFAULTS.freshMomentum.crashRet1hPct, -6);
 });

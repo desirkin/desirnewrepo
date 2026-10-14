@@ -242,13 +242,13 @@ export function createReplayFetch(exchanges) {
 
 // ---- WebSocket client ---------------------------------------------------------------------------------------------
 export const WS_STATES = Object.freeze(['STOPPED', 'CONNECTING', 'OPEN', 'BACKOFF', 'STOPPING']);
-export function createWsClient({ providerId, endpointId, WebSocketImpl = globalThis.WebSocket, clock = () => Date.now(), onMessage, onOpen = () => {}, onClose = () => {}, log = () => {}, idleTimeoutMs = RESOURCE_DEFAULTS.wsIdleTimeoutMs, maxMessageBytes = RESOURCE_DEFAULTS.transportResponseBytes, reconnectBaseMs = 1_000, reconnectMaxMs = 30_000, url = null } = {}) {
+export function createWsClient({ providerId, endpointId, WebSocketImpl = globalThis.WebSocket, clock = () => Date.now(), onMessage, onOpen = () => {}, onClose = () => {}, log = () => {}, idleTimeoutMs = RESOURCE_DEFAULTS.wsIdleTimeoutMs, maxMessageBytes = RESOURCE_DEFAULTS.transportResponseBytes, reconnectBaseMs = 1_000, reconnectMaxMs = 30_000, connectTimeoutMs = 30_000, url = null } = {}) {
   const e = endpointOf(providerId, endpointId);
   if (!e || e.method !== 'WS') fail('INVALID_REQUEST', 'unknown websocket endpoint');
   if (!PROVIDERS[providerId].hosts.includes(e.host)) fail('INVALID_REQUEST', 'websocket host outside allowlist');
   const target = url ?? `wss://${e.host}${e.path}`;
   if (!target.startsWith(`wss://${e.host}`) && !/^wss?:\/\/(127\.0\.0\.1|localhost)(:\d+)?/.test(target)) fail('INVALID_REQUEST', 'websocket url must be the registry host (or a loopback test server)');
-  let ws = null; let state = 'STOPPED'; let epoch = 0; let attempt = 0; let idleTimer = null; let reconnectTimer = null;
+  let ws = null; let state = 'STOPPED'; let epoch = 0; let attempt = 0; let idleTimer = null; let reconnectTimer = null; let connectTimer = null;
   // B-11: has any message arrived since THIS connection opened? It is the one predicate that separates the expected
   // pre-subscribe quiet window (open, subscribe sent, first ack/data not yet back — a normal gap, never a stall) from a
   // genuine post-subscribe idle (data flowed, then went silent — a real stall an operator must see). The idle watchdog
@@ -274,7 +274,11 @@ export function createWsClient({ providerId, endpointId, WebSocketImpl = globalT
     let sock;
     try { sock = new WebSocketImpl(target); } catch (err) { state = 'BACKOFF'; schedule(); return; }
     ws = sock;
-    sock.onopen = () => { if (state === 'STOPPING' || state === 'STOPPED') return; /* PUBLISH-FIX-84: a socket that opens after stop() never revives the client */ state = 'OPEN'; attempt = 0; messagedSinceOpen = false; counters.openedTs = clock(); armIdle(); try { onOpen({ epochId: epochId(), send }); } catch (err) { log(`ws onOpen failed: ${String(err?.message).slice(0, 120)}`); } };
+    // PUBLISH-FIX-126: a connect that never completes (no onopen, no onclose — a hung TLS handshake, a black-holed route) used to leave
+    // the client CONNECTING forever, which every consumer law reads as "not OPEN, nothing to do". Now the attempt is cut after
+    // connectTimeoutMs and the back-off schedule carries on.
+    clearTimeout(connectTimer); connectTimer = setTimeout(() => { connectTimer = null; if (ws !== sock || state !== 'CONNECTING') return; log(`ws connect timed out after ${connectTimeoutMs} ms — retrying`); ws = null; sock.onopen = null; sock.onclose = null; sock.onmessage = null; sock.onerror = () => {}; try { sock.close(); } catch { /* best effort */ } counters.connectTimeouts = (counters.connectTimeouts ?? 0) + 1; state = 'BACKOFF'; schedule(); }, connectTimeoutMs); connectTimer.unref?.();
+    sock.onopen = () => { clearTimeout(connectTimer); connectTimer = null; if (state === 'STOPPING' || state === 'STOPPED') return; /* PUBLISH-FIX-84: a socket that opens after stop() never revives the client */ state = 'OPEN'; attempt = 0; messagedSinceOpen = false; counters.openedTs = clock(); armIdle(); try { onOpen({ epochId: epochId(), send }); } catch (err) { log(`ws onOpen failed: ${String(err?.message).slice(0, 120)}`); } };
     sock.onmessage = (ev) => {
       const receivedTs = clock(); counters.lastMessageTs = receivedTs; messagedSinceOpen = true; armIdle();
       const raw = typeof ev.data === 'string' ? ev.data : Buffer.from(ev.data);
@@ -286,14 +290,14 @@ export function createWsClient({ providerId, endpointId, WebSocketImpl = globalT
       try { onMessage(parsed.value, { receivedTs, epochId: epochId(), bytesSha256: sha256Hex(typeof raw === 'string' ? Buffer.from(raw) : raw), bytes: size }); } catch (err) { log(`ws consumer failed (contained): ${String(err?.message).slice(0, 120)}`); }
     };
     sock.onerror = () => {};
-    sock.onclose = () => { clearTimeout(idleTimer); const was = state; ws = null; try { onClose({ epochId: epochId(), reason: was === 'STOPPING' ? 'STOPPED' : 'CLOSED' }); } catch { /* contained */ } if (was === 'STOPPING') { state = 'STOPPED'; return; } state = 'BACKOFF'; counters.reconnects += 1; schedule(); };
+    sock.onclose = () => { clearTimeout(idleTimer); clearTimeout(connectTimer); connectTimer = null; const was = state; ws = null; try { onClose({ epochId: epochId(), reason: was === 'STOPPING' ? 'STOPPED' : 'CLOSED' }); } catch { /* contained */ } if (was === 'STOPPING') { state = 'STOPPED'; return; } state = 'BACKOFF'; counters.reconnects += 1; schedule(); };
   }
   function schedule() { const delay = backoffMs(attempt, { baseMs: reconnectBaseMs, maxMs: reconnectMaxMs }); attempt += 1; reconnectTimer = setTimeout(() => { reconnectTimer = null; if (state !== 'STOPPING' && state !== 'STOPPED') connect(); }, delay); }
   function send(obj) { if (ws && ws.readyState === 1) { ws.send(JSON.stringify(obj)); return true; } return false; }
   return {
     start: () => { if (state !== 'STOPPED') return; connect(); },
     // stop never hangs: a peer that ignores the close handshake is cut after a bounded grace period
-    stop: ({ graceMs = 2000 } = {}) => new Promise((resolve) => { if (state === 'STOPPED') return resolve(); clearTimeout(reconnectTimer); reconnectTimer = null; clearTimeout(idleTimer); if (!ws) { state = 'STOPPED'; return resolve(); } state = 'STOPPING'; const sock = ws; let done = false; const finish = () => { if (done) return; done = true; clearTimeout(grace); state = 'STOPPED'; ws = null; resolve(); }; const prev = sock.onclose; sock.onclose = (ev) => { try { prev?.(ev); } catch { /* contained */ } finish(); }; const grace = setTimeout(() => { log('ws close handshake timed out — terminating'); try { sock.onclose = null; sock.close(); } catch { /* ignore */ } try { onClose({ epochId: epochId(), reason: 'STOPPED' }); } catch { /* contained */ } finish(); }, graceMs); grace.unref?.(); try { sock.close(); } catch { finish(); } }),
+    stop: ({ graceMs = 2000 } = {}) => new Promise((resolve) => { if (state === 'STOPPED') return resolve(); clearTimeout(reconnectTimer); reconnectTimer = null; clearTimeout(idleTimer); clearTimeout(connectTimer); connectTimer = null; if (!ws) { state = 'STOPPED'; return resolve(); } state = 'STOPPING'; const sock = ws; let done = false; const finish = () => { if (done) return; done = true; clearTimeout(grace); state = 'STOPPED'; ws = null; resolve(); }; const prev = sock.onclose; sock.onclose = (ev) => { try { prev?.(ev); } catch { /* contained */ } finish(); }; const grace = setTimeout(() => { log('ws close handshake timed out — terminating'); try { sock.onclose = null; sock.close(); } catch { /* ignore */ } try { onClose({ epochId: epochId(), reason: 'STOPPED' }); } catch { /* contained */ } finish(); }, graceMs); grace.unref?.(); try { sock.close(); } catch { finish(); } }),
     send,
     // PUBLISH-FIX-84: a consumer that sees its DATA go stale while the socket reads OPEN forces a fresh connection (the same detached drop)
     reconnect: (reason = 'CONSUMER') => (state === 'OPEN' && ws ? dropSocket(reason) : false),
